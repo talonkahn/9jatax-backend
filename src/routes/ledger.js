@@ -20,7 +20,6 @@ router.post("/from-invoice", requireCompany, async (req, res) => {
   try {
     await client.query("BEGIN");
 
-    // Create ledger entry
     const entryRes = await client.query(
       `
       INSERT INTO ledger_entries
@@ -33,47 +32,24 @@ router.post("/from-invoice", requireCompany, async (req, res) => {
 
     const entryId = entryRes.rows[0].id;
 
-    // Resolve accounts
     const accRes = await client.query(
-      `
-      SELECT id, code
-      FROM accounts
-      WHERE company_id = $1
-      `,
+      `SELECT id, code FROM accounts WHERE company_id = $1`,
       [companyId]
     );
 
-    const acc = Object.fromEntries(
-      accRes.rows.map(a => [Number(a.code), a.id])
-    );
+    const acc = Object.fromEntries(accRes.rows.map(a => [Number(a.code), a.id]));
 
-    // Hard accounting guarantees
     if (!acc[1100]) throw new Error("Accounts Receivable (1100) missing");
     if (!acc[4000]) throw new Error("Revenue (4000) missing");
-    if (Number(vat) > 0 && !acc[2100]) {
-      throw new Error("VAT Payable (2100) missing");
-    }
+    if (Number(vat) > 0 && !acc[2100]) throw new Error("VAT Payable (2100) missing");
 
-    // Build ledger lines safely
     const lines = [
-      {
-        account: acc[1100],
-        debit: Number(total),
-        credit: 0
-      },
-      {
-        account: acc[4000],
-        debit: 0,
-        credit: Number(subtotal)
-      }
+      { account: acc[1100], debit: Number(total), credit: 0 },
+      { account: acc[4000], debit: 0, credit: Number(subtotal) }
     ];
 
     if (Number(vat) > 0) {
-      lines.push({
-        account: acc[2100],
-        debit: 0,
-        credit: Number(vat)
-      });
+      lines.push({ account: acc[2100], debit: 0, credit: Number(vat) });
     }
 
     const values = [];
@@ -84,17 +60,12 @@ router.post("/from-invoice", requireCompany, async (req, res) => {
     });
 
     await client.query(
-      `
-      INSERT INTO ledger_lines
-        (ledger_entry_id, account_id, debit, credit)
-      VALUES ${placeholders.join(",")}
-      `,
+      `INSERT INTO ledger_lines (ledger_entry_id, account_id, debit, credit) VALUES ${placeholders.join(",")}`,
       values
     );
 
     await client.query("COMMIT");
     res.json({ success: true, entryId });
-
   } catch (err) {
     await client.query("ROLLBACK");
     console.error("LEDGER INVOICE ERROR:", err.message);
@@ -146,6 +117,49 @@ router.get("/", requireCompany, async (req, res) => {
 });
 
 /* =====================
+   GET LEDGER FOR SPECIFIC COMPANY
+===================== */
+router.get("/company/:companyId", async (req, res) => {
+  const { companyId } = req.params;
+
+  try {
+    const { rows } = await pool.query(
+      `
+      SELECT
+        le.id,
+        le.date,
+        le.description,
+        le.status,
+        le.source_type,
+        json_agg(
+          json_build_object(
+            'account_code', a.code,
+            'account_name', a.name,
+            'debit', ll.debit,
+            'credit', ll.credit
+          )
+          ORDER BY a.code
+        ) AS lines
+      FROM ledger_entries le
+      JOIN ledger_lines ll ON ll.ledger_entry_id = le.id
+
+JOIN accounts a ON a.id = ll.account_id
+      WHERE le.company_id = $1
+      GROUP BY le.id, le.date, le.description, le.status, le.source_type
+      ORDER BY le.date DESC, le.id DESC
+      `,
+      [companyId]
+    );
+
+    if (!rows.length) return res.status(404).json({ error: "Ledger not found" });
+    res.json(rows);
+  } catch (err) {
+    console.error("LEDGER COMPANY FETCH ERROR:", err.message);
+    res.status(500).json({ error: "Failed to fetch ledger for company" });
+  }
+});
+
+/* =====================
    RECENT ACTIVITY (DASHBOARD)
 ===================== */
 router.get("/recent", requireCompany, async (req, res) => {
@@ -158,14 +172,7 @@ router.get("/recent", requireCompany, async (req, res) => {
         le.id,
         le.date,
         le.description,
-        SUM(
-          CASE
-            WHEN ll.debit > 0 THEN ll.debit
-            ELSE ll.
-
-credit
-          END
-        ) AS amount
+        SUM(COALESCE(ll.debit, 0) - COALESCE(ll.credit, 0)) AS amount
       FROM ledger_entries le
       JOIN ledger_lines ll ON ll.ledger_entry_id = le.id
       WHERE le.company_id = $1
