@@ -25,7 +25,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 router.post("/signup", async (req, res) => {
   try {
     const { email, password, name } = req.body;
-    if (!email  !password  !name) {
+    if (!email || !password || !name) {
       return res.status(400).json({ error: "Missing fields" });
     }
 

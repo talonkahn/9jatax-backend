@@ -38,7 +38,7 @@ router.post("/from-invoice", requireCompany, async (req, res) => {
       .select()
       .maybeSingle();
 
-    if (entryError  !entry) throw entryError  new Error("Failed to create entry");
+    if (entryError || !entry) throw entryError || new Error("Failed to create entry");
 
     const entryId = entry.id;
 
