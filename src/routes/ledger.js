@@ -36,9 +36,9 @@ router.post("/from-invoice", requireCompany, async (req, res) => {
         },
       ])
       .select()
-      .single();
+      .maybeSingle();
 
-    if (entryError) throw entryError;
+    if (entryError  !entry) throw entryError  new Error("Failed to create entry");
 
     const entryId = entry.id;
 
@@ -146,11 +146,11 @@ router.get("/company/:companyId", async (req, res) => {
         date,
         description,
         status,
-        source_type,
+
+source_type,
         ledger_lines(
           debit,
-
-credit,
+          credit,
           accounts!inner(code, name)
         )
       `)
@@ -158,7 +158,7 @@ credit,
       .order("date", { ascending: false });
 
     if (error) throw error;
-    if (!data.length) return res.status(404).json({ error: "Ledger not found" });
+    if (!data || !data.length) return res.status(404).json({ error: "Ledger not found" });
 
     const rows = data.map(le => ({
       id: le.id,

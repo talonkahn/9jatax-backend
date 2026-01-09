@@ -25,8 +25,19 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 router.post("/signup", async (req, res) => {
   try {
     const { email, password, name } = req.body;
-    if (!email || !password || !name) {
+    if (!email  !password  !name) {
       return res.status(400).json({ error: "Missing fields" });
+    }
+
+    // Check if user already exists
+    const { data: existingUser } = await supabase
+      .from("users")
+      .select("id")
+      .eq("email", email)
+      .maybeSingle();
+
+    if (existingUser) {
+      return res.status(409).json({ error: "User already exists" });
     }
 
     // Hash password
@@ -37,9 +48,9 @@ router.post("/signup", async (req, res) => {
       .from("users")
       .insert([{ email, password_hash: hash, name }])
       .select()
-      .single();
+      .maybeSingle();
 
-    if (error) {
+    if (error || !data) {
       console.error("SIGNUP ERROR:", error);
       return res.status(500).json({ error: "Signup failed" });
     }
@@ -111,6 +122,8 @@ router.post("/refresh", (req, res) => {
     if (!authHeader) return res.status(401).json({ error: "No token" });
 
     const token = authHeader.split(" ")[1];
+    if (!token) return res.status(401).json({ error: "No token provided" });
+
     const decoded = jwt.verify(token, JWT_SECRET);
     const { userId } = decoded;
 
