@@ -3,9 +3,10 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "node src/server.js"
+    "dev": "node start.js"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.90.0",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",

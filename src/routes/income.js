@@ -1,8 +1,14 @@
 import express from "express";
-import { pool } from "../db/index.js";
+import { createClient } from "@supabase/supabase-js";
 import { requireCompany } from "../middleware/requireCompany.js";
 
 const router = express.Router();
+
+// Supabase client (server-side)
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
 /*
 POST /api/income
@@ -24,43 +30,34 @@ router.post("/", requireCompany, async (req, res) => {
     return res.status(400).json({ error: "Missing or invalid fields" });
   }
 
-  const client = await pool.connect();
-
   try {
-    await client.query("BEGIN");
+    // 1️⃣ Create ledger entry
+    const { data: entryData, error: entryErr } = await supabase
+      .from("ledger_entries")
+      .insert({
+        company_id: companyId,
+        date,
+        description,
+        status: "posted",
+        source_type: "income"
+      })
+      .select("id")
+      .single();
 
-    // 1. Create ledger entry
-    const entryRes = await client.query(
-      `
-      INSERT INTO ledger_entries
-        (company_id, date, description, status, source_type)
-      VALUES
-        ($1, $2, $3, 'posted', 'income')
-      RETURNING id
-      `,
-      [companyId, date, description]
-    );
+    if (entryErr) throw entryErr;
 
-    const entryId = entryRes.rows[0].id;
+    const entryId = entryData.id;
 
-    // 2. Resolve accounts
-    const accRes = await client.query(
-      `
-      SELECT id, code
-      FROM accounts
-      WHERE company_id = $1
-        AND code = ANY($2::int[])
-      `,
-      [
-        companyId,
-        [Number(incomeAccountCode), Number(paymentAccountCode)]
-      ]
-    );
+    // 2️⃣ Resolve accounts
+    const { data: accountsData, error: accErr } = await supabase
+      .from("accounts")
+      .select("id, code")
+      .eq("company_id", companyId)
+      .in("code", [Number(incomeAccountCode), Number(paymentAccountCode)]);
 
-    const accounts = {};
-    accRes.rows.forEach(r => {
-      accounts[Number(r.code)] = r.id;
-    });
+    if (accErr) throw accErr;
+
+    const accounts = Object.fromEntries(accountsData.map(a => [Number(a.code), a.id]));
 
     if (!accounts[Number(paymentAccountCode)]) {
       throw new Error(`Payment account ${paymentAccountCode} not found`);
@@ -70,32 +67,29 @@ router.post("/", requireCompany, async (req, res) => {
       throw new Error(`Income account ${incomeAccountCode} not found`);
     }
 
-    // 3. Double-entry posting
-    await client.query(
-      `
-      INSERT INTO ledger_lines
-        (ledger_entry_id, account_id, debit, credit)
-      VALUES
-        ($1, $2, $3, 0),
-        ($1, $4, 0, $3)
-      `,
-      [
-        entryId,
-        accounts[Number(paymentAccountCode)], // Cash ↑
-        Number(amount),
-        accounts[Number(incomeAccountCode)]   // Revenue ↑
-      ]
-    );
+    // 3️⃣ Double-entry posting
+    const { error: lineErr } = await supabase.from("ledger_lines").insert([
+      {
+        ledger_entry_id: entryId,
+        account_id: accounts[Number(paymentAccountCode)], // Cash ↑
+        debit: Number(amount),
+        credit: 0
+      },
+      {
+        ledger_entry_id: entryId,
+        account_id: accounts[Number(incomeAccountCode)], // Revenue ↑
+        debit: 0,
+        credit: Number(amount)
+      }
+    ]);
 
-    await client.query("COMMIT");
+    if (lineErr) throw lineErr;
+
     res.json({ success: true, entryId });
 
   } catch (err) {
-    await client.query("ROLLBACK");
-    console.error("INCOME ERROR:", err.message);
-    res.status(500).json({ error: err.message });
-  } finally {
-    client.release();
+    console.error("INCOME ERROR:", err);
+    res.status(500).json({ error: err.message || "Failed to post income" });
   }
 });
 

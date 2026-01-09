@@ -1,5 +1,5 @@
 import express from "express";
-import { pool } from "../db/index.js";
+import { supabase } from "../db/index.js";
 
 const router = express.Router();
 
@@ -9,16 +9,16 @@ const router = express.Router();
 router.get("/company/:companyId", async (req, res) => {
   try {
     const { companyId } = req.params;
-    const { rows } = await pool.query(
-      `
-      SELECT id, user_email, role, created_at
-      FROM company_users
-      WHERE company_id = $1
-      ORDER BY created_at DESC
-      `,
-      [companyId]
-    );
-    res.json(rows);
+
+    const { data, error } = await supabase
+      .from("company_users")
+      .select("id, user_email, role, created_at")
+      .eq("company_id", companyId)
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+
+    res.json(data);
   } catch (err) {
     console.error("FETCH USERS ERROR:", err.message);
     res.status(500).json({ error: "Failed to fetch users" });
@@ -31,20 +31,26 @@ router.get("/company/:companyId", async (req, res) => {
 router.post("/", async (req, res) => {
   try {
     const { company_id, user_email, role } = req.body;
+
     if (!company_id || !user_email || !role) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    const { rows } = await pool.query(
-      `
-      INSERT INTO company_users (company_id, user_email, role)
-      VALUES ($1, $2, $3)
-      RETURNING *
-      `,
-      [company_id, user_email, role]
-    );
+    const { data, error } = await supabase
+      .from("company_users")
+      .insert([
+        {
+          company_id,
+          user_email,
+          role,
+        },
+      ])
+      .select()
+      .single();
 
-    res.json(rows[0]);
+    if (error) throw error;
+
+    res.json(data);
   } catch (err) {
     console.error("ADD USER ERROR:", err.message);
     res.status(500).json({ error: "Failed to add user" });
@@ -58,19 +64,24 @@ router.put("/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
     const { role } = req.body;
-    if (!role) return res.status(400).json({ error: "Role required" });
 
-    const { rows } = await pool.query(
-      `
-      UPDATE company_users
-      SET role = $1, updated_at = NOW()
-      WHERE id = $2
-      RETURNING *
-      `,
-      [role, userId]
-    );
+    if (!role) {
+      return res.status(400).json({ error: "Role required" });
+    }
 
-    res.json(rows[0]);
+    const { data, error } = await supabase
+      .from("company_users")
+      .update({
+        role,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", userId)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.json(data);
   } catch (err) {
     console.error("UPDATE USER ERROR:", err.message);
     res.status(500).json({ error: "Failed to update user" });
@@ -83,7 +94,14 @@ router.put("/:userId", async (req, res) => {
 router.delete("/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
-    await pool.query("DELETE FROM company_users WHERE id = $1", [userId]);
+
+    const { error } = await supabase
+      .from("company_users")
+      .delete()
+      .eq("id", userId);
+
+    if (error) throw error;
+
     res.json({ success: true });
   } catch (err) {
     console.error("DELETE USER ERROR:", err.message);

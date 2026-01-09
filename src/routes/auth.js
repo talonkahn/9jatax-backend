@@ -1,13 +1,23 @@
 import express from "express";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
-import { pool } from "../db/index.js";
-import { randomUUID } from "crypto";
+import { createClient } from "@supabase/supabase-js";
 
 const router = express.Router();
 
-const JWT_SECRET = process.env.JWT_SECRET || "perlanet";
+// Environment variables
+const JWT_SECRET = process.env.JWT_SECRET || "supersecretvalue123";
 const TOKEN_EXPIRY = "7d";
+
+const SUPABASE_URL = process.env.SUPABASE_URL || "https://ongxymhxgpejiqbissad.supabase.co";
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+if (!SUPABASE_SERVICE_ROLE_KEY) {
+  console.error("❌ SUPABASE_SERVICE_ROLE_KEY missing in .env");
+  process.exit(1);
+}
+
+// Supabase client
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 /* =====================
    SIGNUP
@@ -15,45 +25,35 @@ const TOKEN_EXPIRY = "7d";
 router.post("/signup", async (req, res) => {
   try {
     const { email, password, name } = req.body;
-
-    if (!email || !password) {
+    if (!email || !password || !name) {
       return res.status(400).json({ error: "Missing fields" });
     }
 
+    // Hash password
     const hash = await bcrypt.hash(password, 10);
-    const userId = randomUUID();
 
-    const { rows } = await pool.query(
-      `
-      INSERT INTO users (id, email, password_hash, name)
-      VALUES ($1, $2, $3, $4)
-      RETURNING id, email, name
-      `,
-      [userId, email, hash, name]
-    );
+    // Insert user into Supabase
+    const { data, error } = await supabase
+      .from("users")
+      .insert([{ email, password_hash: hash, name }])
+      .select()
+      .single();
 
-    const user = rows[0];
+    if (error) {
+      console.error("SIGNUP ERROR:", error);
+      return res.status(500).json({ error: "Signup failed" });
+    }
 
-    // 🔑 No company yet
+    // Generate JWT
     const token = jwt.sign(
-      {
-        userId: user.id,
-        companyId: null,
-        role: "Viewer",
-      },
+      { userId: data.id, companyId: null, role: "Viewer" },
       JWT_SECRET,
       { expiresIn: TOKEN_EXPIRY }
     );
 
     res.json({
       token,
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        company_id: null,
-        role: "Viewer",
-      },
+      user: { id: data.id, email: data.email, name: data.name, company_id: null, role: "Viewer" },
     });
   } catch (err) {
     console.error("SIGNUP ERROR:", err);
@@ -67,55 +67,34 @@ router.post("/signup", async (req, res) => {
 router.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: "Missing fields" });
+    }
 
-    const { rows } = await pool.query(
-      `
-      SELECT id, email, password_hash, name
-      FROM users
-      WHERE email = $1
-      `,
-      [email]
-    );
+    // Fetch user by email
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("*")
+      .eq("email", email)
+      .single();
 
-    const user = rows[0];
-    if (!user) {
+    if (error || !user) {
       return res.status(401).json({ error: "Invalid credentials" });
     }
 
     const ok = await bcrypt.compare(password, user.password_hash);
-    if (!ok) {
-      return res.status(401).json({ error: "Invalid credentials" });
-    }
+    if (!ok) return res.status(401).json({ error: "Invalid credentials" });
 
-    // 🔍 Check if user already belongs to a company
-    const roleRes = await pool.query(
-      `
-      SELECT company_id, role
-      FROM company_users
-      WHERE user_id = $1
-      LIMIT 1
-      `,
-      [user.id]
-    );
-
-    const companyId = roleRes.rows[0]?.company_id || null;
-    const role = roleRes.rows[0]?.role || "Viewer";
-
+    // Generate JWT
     const token = jwt.sign(
-      { userId: user.id, companyId, role },
+      { userId: user.id, companyId: null, role: "Viewer" },
       JWT_SECRET,
       { expiresIn: TOKEN_EXPIRY }
     );
 
     res.json({
       token,
-      user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        company_id: companyId,
-        role,
-      },
+      user: { id: user.id, email: user.email, name: user.name, company_id: null, role: "Viewer" },
     });
   } catch (err) {
     console.error("LOGIN ERROR:", err);
@@ -124,47 +103,24 @@ router.post("/login", async (req, res) => {
 });
 
 /* =====================
-   REFRESH TOKEN (OPTION B 🔥)
-   Called after company onboarding
+   REFRESH TOKEN
 ===================== */
-router.post("/refresh", async (req, res) => {
+router.post("/refresh", (req, res) => {
   try {
     const authHeader = req.headers.authorization;
-    if (!authHeader) {
-      return res.status(401).json({ error: "No token" });
-    }
+    if (!authHeader) return res.status(401).json({ error: "No token" });
 
     const token = authHeader.split(" ")[1];
     const decoded = jwt.verify(token, JWT_SECRET);
-
     const { userId } = decoded;
 
-    const roleRes = await pool.query(
-      `
-      SELECT company_id, role
-      FROM company_users
-      WHERE user_id = $1
-      LIMIT 1
-      `,
-      [userId]
-    );
-
-    const companyId = roleRes.rows[0]?.company_id || null;
-    const role = roleRes.rows[0]?.role || "Viewer";
-
-    const newToken = jwt.sign(
-      { userId, companyId, role },
-      JWT_SECRET,
-      { expiresIn: TOKEN_EXPIRY }
-    );
+    const newToken = jwt.sign({ userId, companyId: null, role: "Viewer" }, JWT_SECRET, {
+      expiresIn: TOKEN_EXPIRY,
+    });
 
     res.json({
       token: newToken,
-      user: {
-        id: userId,
-        company_id: companyId,
-        role,
-      },
+      user: { id: userId, company_id: null, role: "Viewer" },
     });
   } catch (err) {
     console.error("REFRESH ERROR:", err.message);

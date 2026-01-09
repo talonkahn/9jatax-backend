@@ -1,16 +1,20 @@
 import express from "express";
-import { pool } from "../db/index.js";
+import { createClient } from "@supabase/supabase-js";
 import { requireCompany } from "../middleware/requireCompany.js";
 import { seedDefaultAccounts } from "../utils/seedDefaultAccounts.js";
 
 const router = express.Router();
 
+// Supabase client (SERVER SIDE ONLY)
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+
 /* =====================
    CREATE INVOICE + PENDING LEDGER
 ===================== */
 router.post("/", requireCompany, async (req, res) => {
-  const client = await pool.connect();
-
   try {
     const {
       customer_id = null,
@@ -29,130 +33,109 @@ router.post("/", requireCompany, async (req, res) => {
       return res.status(400).json({ error: "Missing required invoice fields" });
     }
 
-    await client.query("BEGIN");
-
     // 1️⃣ Create invoice
-    const invoiceRes = await client.query(
-      `
-      INSERT INTO invoices (
-        company_id,
-        customer_id,
-        customer_name,
-        invoice_number,
-        date,
-        subtotal,
-        vat,
-        total,
-        status,
-        payload
-      )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'sent',$9)
-      RETURNING *
-      `,
-      [
-        companyId,
-        customer_id,
-        customer_name,
-        invoice_number,
-        date,
-        subtotal,
-        vat,
-        total,
-        payload,
-      ]
-    );
+    const { data: invoice, error: invoiceError } = await supabase
+      .from("invoices")
+      .insert([
+        {
+          company_id: companyId,
+          customer_id,
+          customer_name,
+          invoice_number,
+          date,
+          subtotal,
+          vat,
+          total,
+          status: "sent",
+          payload,
+        },
+      ])
+      .select()
+      .single();
 
-    const invoice = invoiceRes.rows[0];
+    if (invoiceError) throw invoiceError;
 
     // 2️⃣ Create pending ledger entry
-    const entryRes = await client.query(
-      `
-      INSERT INTO ledger_entries (
-        company_id,
-        date,
-        description,
-        status,
-        source_type,
-        source_id
-      )
-      VALUES ($1,$2,$3,'pending','invoice',$4)
-      RETURNING id
-      `,
-      [
-        companyId,
-        date,
-       ` Invoice ${invoice.invoice_number}`,
-        invoice.id,
-      ]
-    );
+    const { data: ledgerEntry, error: ledgerEntryError } = await supabase
+      .from("ledger_entries")
+      .insert([
+        {
+          company_id: companyId,
+          date,
+          description: Invoice `${invoice.invoice_number}`,
+          status: "pending",
+          source_type: "invoice",
+          source_id: invoice.id,
+        },
+      ])
+      .select()
+      .single();
 
-    const ledgerEntryId = entryRes.rows[0].id;
+    if (ledgerEntryError) throw ledgerEntryError;
 
-    // 3️⃣ Fetch required accounts (ensure they exist)
-    let accRes = await client.query(
-      `
-      SELECT code, id
-      FROM accounts
-      WHERE company_id = $1
-        AND code IN (1100,4000,2100)
-      `,
-      [companyId]
-    );
+    const ledgerEntryId = ledgerEntry.id;
 
-    let accounts = Object.fromEntries(accRes.rows.map((a) => [a.code, a.id]));
+    // 3️⃣ Fetch required accounts
+    let { data: accountsData, error: accError } = await supabase
+      .from("accounts")
+      .select("code, id")
+      .eq("company_id", companyId)
+      .in("code", [1100, 4000, 2100]);
 
-    // 🔹 If missing, seed default accounts for this company
-    const missingCodes = [1100, 4000, 2100].filter((c) => !accounts[c]);
+    if (accError) throw accError;
+
+    let accounts = Object.fromEntries(accountsData.map(a => [a.code, a.id]));
+
+    // 🔹 Seed missing accounts if needed
+    const missingCodes = [1100, 4000, 2100].filter(c => !accounts[c]);
     if (missingCodes.length) {
       console.log(`Seeding missing accounts for company ${companyId}:`, missingCodes);
-      await seedDefaultAccounts(client, companyId);
-      accRes = await client.query(
-        `
-        SELECT code, id
-        FROM accounts
-        WHERE company_id = $1
-          AND code IN (1100,4000,2100)
-        `,
-        [companyId]
-      );
-      accounts = Object.fromEntries(accRes.rows.map((a) => [a.code, a.id]));
+      await seedDefaultAccounts(supabase, companyId);
+
+      const { data: newAccountsData, error: newAccError } = await supabase
+        .from("accounts")
+        .select("code, id")
+        .eq("company_id", companyId)
+        .in("code", [1100, 4000, 2100]);
+
+      if (newAccError) throw newAccError;
+      accounts = Object.fromEntries(newAccountsData.map(a => [a.code, a.id]));
     }
 
-    // 4️⃣ Final safety check
     if (!accounts[1100] || !accounts[4000] || !accounts[2100]) {
       throw new Error("Required accounts missing after seeding (1100, 4000, 2100)");
     }
 
-    // 5️⃣ Ledger lines (AR, Revenue, VAT)
-    await client.query(
-      `
-      INSERT INTO ledger_lines (ledger_entry_id, account_id, debit, credit)
-      VALUES
-        ($1,$2,$3,0),
-        ($1,$4,0,$5),
-        ($1,$6,0,$7)
-      `,
-      [
-        ledgerEntryId,
-        accounts[1100], // Accounts Receivable
-        total,
-        accounts[4000], // Revenue
-        subtotal,
-        accounts[2100], // VAT Payable
-        vat,
-      ]
-    );
+    // 4️⃣ Ledger lines (AR, Revenue, VAT)
+    const { error: linesError } = await supabase
+      .from("ledger_lines")
+      .insert([
+        {
+          ledger_entry_id: ledgerEntryId,
+          account_id: accounts[1100],
+          debit: total,
+          credit: 0,
+        },
+        {
+          ledger_entry_id: ledgerEntryId,
+          account_id: accounts[4000],
+          debit: 0,
+          credit: subtotal,
+        },
+        {
+          ledger_entry_id: ledgerEntryId,
+          account_id: accounts[2100],
+          debit: 0,
+          credit: vat,
+        },
+      ]);
 
-    await client.query("COMMIT");
+    if (linesError) throw linesError;
+
     res.json(invoice);
   } catch (err) {
-    await client.query("ROLLBACK");
-    console.error("CREATE INVOICE ERROR:", err);
-    res.status(500).json({
-      error: err.message || "Failed to create invoice",
-    });
-  } finally {
-    client.release();
+    console.error("CREATE INVOICE ERROR:", err.message || err);
+    res.status(500).json({ error: err.message || "Failed to create invoice" });
   }
 });
 
@@ -160,92 +143,86 @@ router.post("/", requireCompany, async (req, res) => {
    MARK INVOICE AS PAID + POST LEDGER
 ===================== */
 router.post("/:invoiceId/pay", requireCompany, async (req, res) => {
-  const client = await pool.connect();
-
   try {
     const { invoiceId } = req.params;
     const { amount = 0 } = req.body;
-    const companyId = req.user.companyId;
+    const companyId = req.user.
 
-if (amount <= 0) {
+companyId;
+
+    if (amount <= 0) {
       return res.status(400).json({ error: "Invalid payment amount" });
     }
 
-    await client.query("BEGIN");
+    // 1️⃣ Mark invoice as paid
+    const { error: payError } = await supabase
+      .from("invoices")
+      .update({ status: "paid" })
+      .eq("id", invoiceId)
+      .eq("company_id", companyId);
 
-    // 1️⃣ Mark invoice paid
-    await client.query(
-      `
-      UPDATE invoices
-      SET status = 'paid'
-      WHERE id = $1 AND company_id = $2
-      `,
-      [invoiceId, companyId]
-    );
+    if (payError) throw payError;
 
     // 2️⃣ Fetch pending ledger entry
-    const entryRes = await client.query(
-      `
-      SELECT id
-      FROM ledger_entries
-      WHERE source_type = 'invoice'
-        AND source_id = $1
-        AND status = 'pending'
-      `,
-      [invoiceId]
-    );
+    const { data: ledgerEntries, error: ledgerEntryFetchError } = await supabase
+      .from("ledger_entries")
+      .select("id")
+      .eq("source_type", "invoice")
+      .eq("source_id", invoiceId)
+      .eq("status", "pending");
 
-    const ledgerEntryId = entryRes.rows[0]?.id;
+    if (ledgerEntryFetchError) throw ledgerEntryFetchError;
+
+    const ledgerEntryId = ledgerEntries[0]?.id;
     if (!ledgerEntryId) throw new Error("Pending ledger entry not found");
 
-    await client.query(
-      `UPDATE ledger_entries SET status='posted' WHERE id=$1`,
-      [ledgerEntryId]
-    );
+    // 3️⃣ Post ledger
+    const { error: postLedgerError } = await supabase
+      .from("ledger_entries")
+      .update({ status: "posted" })
+      .eq("id", ledgerEntryId);
 
-    // 3️⃣ Fetch cash + AR accounts
-    const accRes = await client.query(
-      `
-      SELECT code, id
-      FROM accounts
-      WHERE company_id = $1
-        AND code IN (1000,1100)
-      `,
-      [companyId]
-    );
+    if (postLedgerError) throw postLedgerError;
 
-    const accounts = Object.fromEntries(accRes.rows.map((a) => [a.code, a.id]));
+    // 4️⃣ Fetch cash + AR accounts
+    const { data: accountsData, error: accountsError } = await supabase
+      .from("accounts")
+      .select("code, id")
+      .eq("company_id", companyId)
+      .in("code", [1000, 1100]);
+
+    if (accountsError) throw accountsError;
+
+    const accounts = Object.fromEntries(accountsData.map(a => [a.code, a.id]));
 
     if (!accounts[1000] || !accounts[1100]) {
       throw new Error("Required accounts missing (1000, 1100)");
     }
 
-    // 4️⃣ Ledger lines (Cash, AR)
-    await client.query(
-      `
-      INSERT INTO ledger_lines (ledger_entry_id, account_id, debit, credit)
-      VALUES
-        ($1,$2,$3,0),
-        ($1,$4,0,$3)
-      `,
-      [
-        ledgerEntryId,
-        accounts[1000], // Cash
-        amount,
-        accounts[1100], // Accounts Receivable
-      ]
-    );
+    // 5️⃣ Ledger lines (Cash, AR)
+    const { error: linesError } = await supabase
+      .from("ledger_lines")
+      .insert([
+        {
+          ledger_entry_id: ledgerEntryId,
+          account_id: accounts[1000],
+          debit: amount,
+          credit: 0,
+        },
+        {
+          ledger_entry_id: ledgerEntryId,
+          account_id: accounts[1100],
+          debit: 0,
+          credit: amount,
+        },
+      ]);
 
-    await client.query("COMMIT");
+    if (linesError) throw linesError;
+
     res.json({ success: true });
   } catch (err) {
-    await client.query("ROLLBACK");
-    console.error("PAY INVOICE ERROR:", err);
-    res.status(500).json({
-      error: err.message || "Failed to post payment",
-    });
-  } finally {
-    client.release();
+    console.error("PAY INVOICE ERROR:", err.message || err);
+    res.status(500).json({ error: err.message || "Failed to post payment" });
   }
 });
 
@@ -256,19 +233,17 @@ router.get("/company", requireCompany, async (req, res) => {
   try {
     const companyId = req.user.companyId;
 
-    const { rows } = await pool.query(
-      `
-      SELECT *
-      FROM invoices
-      WHERE company_id = $1
-      ORDER BY created_at DESC
-      `,
-      [companyId]
-    );
+    const { data: invoices, error } = await supabase
+      .from("invoices")
+      .select("*")
+      .eq("company_id", companyId)
+      .order("created_at", { ascending: false });
 
-    res.json(rows);
+    if (error) throw error;
+
+    res.json(invoices);
   } catch (err) {
-    console.error("FETCH INVOICES ERROR:", err);
+    console.error("FETCH INVOICES ERROR:", err.message || err);
     res.status(500).json({ error: "Failed to fetch invoices" });
   }
 });

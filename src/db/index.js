@@ -1,29 +1,14 @@
-import pkg from "pg";
-import dotenv from "dotenv";
+// src/db/index.js
+import { createClient } from '@supabase/supabase-js';
 
-dotenv.config();
-
-const { Pool } = pkg;
-
-if (!process.env.DATABASE_URL) {
-  console.error("❌ DATABASE_URL is missing");
+if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+  console.error("❌ SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing in .env");
   process.exit(1);
 }
 
-export const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === "production"
-    ? { rejectUnauthorized: false }
-    : false,
-});
+export const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
-// 🔌 Log successful connection
-pool.on("connect", () => {
-  console.log("🟢 Postgres connected");
-});
-
-// ❌ Log unexpected errors
-pool.on("error", (err) => {
-  console.error("🔴 Postgres pool error:", err);
-  process.exit(1);
-});
+console.log("🟢 Supabase client ready");

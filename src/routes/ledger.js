@@ -1,8 +1,14 @@
 import express from "express";
-import { pool } from "../db/index.js";
+import { createClient } from "@supabase/supabase-js";
 import { requireCompany } from "../middleware/requireCompany.js";
 
 const router = express.Router();
+
+// Supabase client (SERVER SIDE ONLY)
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
 /* =====================
    CREATE LEDGER ENTRY FROM INVOICE
@@ -15,63 +21,67 @@ router.post("/from-invoice", requireCompany, async (req, res) => {
     return res.status(400).json({ error: "Missing required fields" });
   }
 
-  const client = await pool.connect();
-
   try {
-    await client.query("BEGIN");
+    // 1️⃣ Create ledger entry
+    const { data: entry, error: entryError } = await supabase
+      .from("ledger_entries")
+      .insert([
+        {
+          company_id: companyId,
+          date,
+          description: Invoice `${invoiceId}`,
+          status: "posted",
+          source_type: "invoice",
+          source_id: invoiceId,
+        },
+      ])
+      .select()
+      .single();
 
-    const entryRes = await client.query(
-      `
-      INSERT INTO ledger_entries
-        (company_id, date, description, status, source_type, source_id)
-      VALUES ($1, $2, $3, 'posted', 'invoice', $4)
-      RETURNING id
-      `,
-      [companyId, date, `Invoice ${invoiceId}`, invoiceId]
-    );
+    if (entryError) throw entryError;
 
-    const entryId = entryRes.rows[0].id;
+    const entryId = entry.id;
 
-    const accRes = await client.query(
-      `SELECT id, code FROM accounts WHERE company_id = $1`,
-      [companyId]
-    );
+    // 2️⃣ Fetch accounts
+    const { data: accountsData, error: accError } = await supabase
+      .from("accounts")
+      .select("id, code")
+      .eq("company_id", companyId);
 
-    const acc = Object.fromEntries(accRes.rows.map(a => [Number(a.code), a.id]));
+    if (accError) throw accError;
+
+    const acc = Object.fromEntries(accountsData.map(a => [Number(a.code), a.id]));
 
     if (!acc[1100]) throw new Error("Accounts Receivable (1100) missing");
     if (!acc[4000]) throw new Error("Revenue (4000) missing");
     if (Number(vat) > 0 && !acc[2100]) throw new Error("VAT Payable (2100) missing");
 
+    // 3️⃣ Prepare ledger lines
     const lines = [
-      { account: acc[1100], debit: Number(total), credit: 0 },
-      { account: acc[4000], debit: 0, credit: Number(subtotal) }
+      { account_id: acc[1100], debit: Number(total), credit: 0 },
+      { account_id: acc[4000], debit: 0, credit: Number(subtotal) },
     ];
 
     if (Number(vat) > 0) {
-      lines.push({ account: acc[2100], debit: 0, credit: Number(vat) });
+      lines.push({ account_id: acc[2100], debit: 0, credit: Number(vat) });
     }
 
-    const values = [];
-    const placeholders = lines.map((l, i) => {
-      const base = i * 4;
-      values.push(entryId, l.account, l.debit, l.credit);
-      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4})`;
-    });
+    // 4️⃣ Insert ledger lines
+    const { error: linesError } = await supabase
+      .from("ledger_lines")
+      .insert(lines.map(l => ({
+        ledger_entry_id: entryId,
+        account_id: l.account_id,
+        debit: l.debit,
+        credit: l.credit,
+      })));
 
-    await client.query(
-      `INSERT INTO ledger_lines (ledger_entry_id, account_id, debit, credit) VALUES ${placeholders.join(",")}`,
-      values
-    );
+    if (linesError) throw linesError;
 
-    await client.query("COMMIT");
     res.json({ success: true, entryId });
   } catch (err) {
-    await client.query("ROLLBACK");
-    console.error("LEDGER INVOICE ERROR:", err.message);
-    res.status(500).json({ error: err.message });
-  } finally {
-    client.release();
+    console.error("LEDGER INVOICE ERROR:", err.message || err);
+    res.status(500).json({ error: err.message || "Failed to create ledger entry" });
   }
 });
 
@@ -82,36 +92,42 @@ router.get("/", requireCompany, async (req, res) => {
   const companyId = req.user.companyId;
 
   try {
-    const { rows } = await pool.query(
-      `
-      SELECT
-        le.id,
-        le.date,
-        le.description,
-        le.status,
-        le.source_type,
-        json_agg(
-          json_build_object(
-            'account_code', a.code,
-            'account_name', a.name,
-            'debit', ll.debit,
-            'credit', ll.credit
-          )
-          ORDER BY a.code
-        ) AS lines
-      FROM ledger_entries le
-      JOIN ledger_lines ll ON ll.ledger_entry_id = le.id
-      JOIN accounts a ON a.id = ll.account_id
-      WHERE le.company_id = $1
-      GROUP BY le.id, le.date, le.description, le.status, le.source_type
-      ORDER BY le.date DESC, le.id DESC
-      `,
-      [companyId]
-    );
+    const { data, error } = await supabase
+      .from("ledger_entries")
+      .select(`
+        id,
+        date,
+        description,
+        status,
+        source_type,
+        ledger_lines(
+          debit,
+          credit,
+          accounts!inner(code, name)
+        )
+      `)
+      .eq("company_id", companyId)
+      .order("date", { ascending: false });
+
+    if (error) throw error;
+
+    const rows = data.map(le => ({
+      id: le.id,
+      date: le.date,
+      description: le.description,
+      status: le.status,
+      source_type: le.source_type,
+      lines: le.ledger_lines.map(ll => ({
+        account_code: ll.accounts.code,
+        account_name: ll.accounts.name,
+        debit: ll.debit,
+        credit: ll.credit,
+      })).sort((a,b) => a.account_code - b.account_code),
+    }));
 
     res.json(rows);
   } catch (err) {
-    console.error("LEDGER FETCH ERROR:", err.message);
+    console.error("LEDGER FETCH ERROR:", err.message || err);
     res.status(500).json({ error: "Failed to fetch ledger" });
   }
 });
@@ -123,38 +139,44 @@ router.get("/company/:companyId", async (req, res) => {
   const { companyId } = req.params;
 
   try {
-    const { rows } = await pool.query(
-      `
-      SELECT
-        le.id,
-        le.date,
-        le.description,
-        le.status,
-        le.source_type,
-        json_agg(
-          json_build_object(
-            'account_code', a.code,
-            'account_name', a.name,
-            'debit', ll.debit,
-            'credit', ll.credit
-          )
-          ORDER BY a.code
-        ) AS lines
-      FROM ledger_entries le
-      JOIN ledger_lines ll ON ll.ledger_entry_id = le.id
+    const { data, error } = await supabase
+      .from("ledger_entries")
+      .select(`
+        id,
+        date,
+        description,
+        status,
+        source_type,
+        ledger_lines(
 
-JOIN accounts a ON a.id = ll.account_id
-      WHERE le.company_id = $1
-      GROUP BY le.id, le.date, le.description, le.status, le.source_type
-      ORDER BY le.date DESC, le.id DESC
-      `,
-      [companyId]
-    );
+debit,
+          credit,
+          accounts!inner(code, name)
+        )
+      `)
+      .eq("company_id", companyId)
+      .order("date", { ascending: false });
 
-    if (!rows.length) return res.status(404).json({ error: "Ledger not found" });
+    if (error) throw error;
+    if (!data.length) return res.status(404).json({ error: "Ledger not found" });
+
+    const rows = data.map(le => ({
+      id: le.id,
+      date: le.date,
+      description: le.description,
+      status: le.status,
+      source_type: le.source_type,
+      lines: le.ledger_lines.map(ll => ({
+        account_code: ll.accounts.code,
+        account_name: ll.accounts.name,
+        debit: ll.debit,
+        credit: ll.credit,
+      })).sort((a,b) => a.account_code - b.account_code),
+    }));
+
     res.json(rows);
   } catch (err) {
-    console.error("LEDGER COMPANY FETCH ERROR:", err.message);
+    console.error("LEDGER COMPANY FETCH ERROR:", err.message || err);
     res.status(500).json({ error: "Failed to fetch ledger for company" });
   }
 });
@@ -166,26 +188,33 @@ router.get("/recent", requireCompany, async (req, res) => {
   const companyId = req.user.companyId;
 
   try {
-    const { rows } = await pool.query(
-      `
-      SELECT
-        le.id,
-        le.date,
-        le.description,
-        SUM(COALESCE(ll.debit, 0) - COALESCE(ll.credit, 0)) AS amount
-      FROM ledger_entries le
-      JOIN ledger_lines ll ON ll.ledger_entry_id = le.id
-      WHERE le.company_id = $1
-      GROUP BY le.id, le.date, le.description
-      ORDER BY le.date DESC
-      LIMIT 5
-      `,
-      [companyId]
-    );
+    const { data, error } = await supabase
+      .from("ledger_entries")
+      .select(`
+        id,
+        date,
+        description,
+        ledger_lines(debit, credit)
+      `)
+      .eq("company_id", companyId)
+      .order("date", { ascending: false })
+      .limit(5);
+
+    if (error) throw error;
+
+    const rows = data.map(le => ({
+      id: le.id,
+      date: le.date,
+      description: le.description,
+      amount: le.ledger_lines.reduce(
+        (sum, ll) => sum + (ll.debit || 0) - (ll.credit || 0),
+        0
+      ),
+    }));
 
     res.json(rows);
   } catch (err) {
-    console.error("RECENT LEDGER ERROR:", err.message);
+    console.error("RECENT LEDGER ERROR:", err.message || err);
     res.status(500).json({ error: "Failed to fetch recent activity" });
   }
 });

@@ -1,10 +1,16 @@
 import express from "express";
 import PDFDocument from "pdfkit";
-import { pool } from "../db/index.js";
 import fs from "fs";
 import path from "path";
+import { createClient } from "@supabase/supabase-js";
 
 const router = express.Router();
+
+// Supabase client (server-side)
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
 /* =====================
    VAT EXPORT CSV
@@ -13,38 +19,32 @@ router.get("/vat/csv/:companyId", async (req, res) => {
   const { companyId } = req.params;
 
   try {
-    const { rows } = await pool.query(
-      `
-      SELECT
-        date_trunc('month', le.date) AS month,
-        SUM(ll.credit) AS vat_amount
-      FROM ledger_entries le
-      JOIN ledger_lines ll ON ll.ledger_entry_id = le.id
-      JOIN accounts a ON a.id = ll.account_id
-      WHERE le.company_id = $1
-        AND le.status = 'posted'
-        AND a.code = 2100
-      GROUP BY month
-      ORDER BY month
-      `,
-      [companyId]
-    );
+    const { data: rows, error } = await supabase
+      .from("ledger_lines")
+      .select(`ledger_entries(date), credit, debit, accounts(code)`)
+      .eq("ledger_entries.company_id", companyId)
+      .eq("ledger_entries.status", "posted")
+      .eq("accounts.code", 2100)
+      .order("ledger_entries.date", { ascending: true });
+
+    if (error) throw error;
 
     const csvHeader = "Month,VAT Collected (NGN)\n";
     const csvRows = rows.map(r => {
-      const month = new Date(r.month).toLocaleString("default", {
+      const month = new Date(r.ledger_entries.date).toLocaleString("default", {
         month: "long",
         year: "numeric"
       });
-      const amount = Number(r.vat_amount || 0).toFixed(2);
-      `return ${month},${amount}`;
+      const amount = Number(r.credit || 0).toFixed(2);
+      return `${month},${amount}`;
     });
 
     res.setHeader("Content-Disposition", "attachment; filename=VAT_Report.csv");
     res.setHeader("Content-Type", "text/csv");
     res.send(csvHeader + csvRows.join("\n"));
+
   } catch (err) {
-    console.error("VAT CSV ERROR:", err.message);
+    console.error("VAT CSV ERROR:", err);
     res.status(500).json({ error: "VAT CSV export failed" });
   }
 });
@@ -57,34 +57,30 @@ router.get("/vat/pdf/:companyId", async (req, res) => {
 
   try {
     // 1️⃣ VAT DATA
-    const { rows } = await pool.query(
-      `
-      SELECT
-        date_trunc('month', le.date) AS month,
-        SUM(ll.credit) AS vat_amount
-      FROM ledger_entries le
-      JOIN ledger_lines ll ON ll.ledger_entry_id = le.id
-      JOIN accounts a ON a.id = ll.account_id
-      WHERE le.company_id = $1
-        AND le.status = 'posted'
-        AND a.code = 2100
-      GROUP BY month
-      ORDER BY month
-      `,
-      [companyId]
-    );
+    const { data: vatRows, error: vatErr } = await supabase
+      .from("ledger_lines")
+      .select(`ledger_entries(date), credit, debit, accounts(code)`)
+      .eq("ledger_entries.company_id", companyId)
+      .eq("ledger_entries.status", "posted")
+      .eq("accounts.code", 2100)
+      .order("ledger_entries.date", { ascending: true });
+
+    if (vatErr) throw vatErr;
 
     // 2️⃣ COMPANY INFO
-    const compRes = await pool.query(
-      `SELECT name, tin, rc, industry FROM companies WHERE id = $1`,
-      [companyId]
-    );
+    const { data: compData, error: compErr } = await supabase
+      .from("companies")
+      .select("name, tin, rc, industry")
+      .eq("id", companyId)
+      .single();
 
-    const company = compRes.rows[0] || {
+    if (compErr) throw compErr;
+
+    const company = compData || {
       name: "Registered Business Name",
       tin: "TIN-XXXXXXXX",
       address: "Company Registered Address",
-      currency: "NGN"
+      currency: "NGN",
     };
 
     const doc = new PDFDocument({ size: "A4", margin: 50 });
@@ -121,7 +117,7 @@ router.get("/vat/pdf/:companyId", async (req, res) => {
       .text(`Registration Number (RC): ${company.rc || "-"}`)
       .text(`Industry: ${company.industry || "-"}`)
       .text(`Report Generated: ${new Date().toLocaleDateString()}`)
-      .text(`Currency: NGN`);
+      .text("Currency: NGN");
 
     doc.moveDown(1.5);
     doc.moveTo(50, doc.y).lineTo(550, doc.y).stroke();
@@ -140,14 +136,14 @@ router.get("/vat/pdf/:companyId", async (req, res) => {
 
     /* ===== TABLE BODY ===== */
     let totalVAT = 0;
-    rows.forEach(r => {
-      const month = new Date(r.month).toLocaleString("default", {
+    vatRows.forEach(r => {
+      const month = new Date(r.
+
+ledger_entries.date).toLocaleString("default", {
         month: "long",
         year: "numeric"
-
-});
-
-      const amount = Number(r.vat_amount || 0);
+      });
+      const amount = Number(r.credit || 0);
       totalVAT += amount;
 
       doc
@@ -192,8 +188,9 @@ router.get("/vat/pdf/:companyId", async (req, res) => {
       );
 
     doc.end();
+
   } catch (err) {
-    console.error("VAT PDF ERROR:", err.message);
+    console.error("VAT PDF ERROR:", err);
     res.status(500).json({ error: "VAT PDF generation failed" });
   }
 });

@@ -1,15 +1,19 @@
 import express from "express";
-import { pool } from "../db/index.js";
+import { createClient } from "@supabase/supabase-js";
 import { seedDefaultAccounts } from "../utils/seedDefaultAccounts.js";
 
 const router = express.Router();
+
+// Supabase client (SERVER SIDE ONLY)
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
 /* =====================
    CREATE COMPANY
 ===================== */
 router.post("/", async (req, res) => {
-  const client = await pool.connect();
-
   try {
     const {
       owner_user_id,
@@ -24,75 +28,73 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    await client.query("BEGIN");
-
     // 1️⃣ Create company
-    const { rows } = await client.query(
-      `
-      INSERT INTO companies (
-        owner_user_id,
-        name,
-        tin,
-        rc,
-        industry,
-        vat_registered
-      )
-      VALUES ($1, $2, $3, $4, $5, $6)
-      RETURNING *
-      `,
-      [owner_user_id, name, tin, rc, industry, vat_registered]
-    );
+    const { data: company, error: companyError } = await supabase
+      .from("companies")
+      .insert([
+        {
+          owner_user_id,
+          name,
+          tin,
+          rc,
+          industry,
+          vat_registered,
+        },
+      ])
+      .select()
+      .single();
 
-    const company = rows[0];
+    if (companyError) {
+      console.error("CREATE COMPANY ERROR:", companyError);
+      return res.status(500).json({ error: "Failed to create company" });
+    }
 
     // 2️⃣ Assign Admin role
-    await client.query(
-      `
-      INSERT INTO company_users (company_id, user_id, role)
-      VALUES ($1, $2, 'Admin')
-      `,
-      [company.id, owner_user_id]
-    );
+    const { error: roleError } = await supabase
+      .from("company_users")
+      .insert([
+        {
+          company_id: company.id,
+          user_id: owner_user_id,
+          role: "Admin",
+        },
+      ]);
+
+    if (roleError) {
+      console.error("ASSIGN ROLE ERROR:", roleError);
+      return res.status(500).json({ error: "Failed to assign role" });
+    }
 
     // 3️⃣ Seed default chart of accounts
-    await seedDefaultAccounts(client, company.id);
-
-    await client.query("COMMIT");
+    await seedDefaultAccounts(supabase, company.id);
 
     res.json(company);
   } catch (err) {
-    await client.query("ROLLBACK");
-    console.error("CREATE COMPANY ERROR:", err);
+    console.error("CREATE COMPANY FATAL:", err);
     res.status(500).json({ error: "Failed to create company" });
-  } finally {
-    client.release();
   }
 });
 
 /* =====================
-   GET CURRENT USER COMPANY (🔥 IMPORTANT)
+   GET CURRENT USER COMPANY
 ===================== */
 router.get("/me/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
 
-    const { rows } = await pool.query(
-      `
-      SELECT c.*
-      FROM companies c
-      JOIN company_users cu ON cu.company_id = c.id
-      WHERE cu.user_id = $1
-      ORDER BY c.created_at DESC
-      LIMIT 1
-      `,
-      [userId]
-    );
+    const { data, error } = await supabase
+      .from("company_users")
+      .select("companies(*)")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .single();
 
-    if (rows.length === 0) {
+    if (error || !data) {
       return res.json(null);
     }
 
-    res.json(rows[0]);
+    res.json(data.companies);
   } catch (err) {
     console.error("FETCH MY COMPANY ERROR:", err);
     res.status(500).json({ error: "Failed to fetch company" });
@@ -106,19 +108,20 @@ router.get("/owner/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
 
-    const { rows } = await pool.query(
-      `
-      SELECT *
-      FROM companies
-      WHERE owner_user_id = $1
-      ORDER BY created_at DESC
-      `,
-      [userId]
-    );
+    const { data, error } = await supabase
+      .from("companies")
+      .select("*")
+      .eq("owner_user_id", userId)
+      .order("created_at", { ascending: false });
 
-    res.json(rows);
+    if (error) {
+      console.error("FETCH COMPANIES ERROR:", error);
+      return res.status(500).json({ error: "Failed to fetch companies" });
+    }
+
+    res.json(data);
   } catch (err) {
-    console.error("FETCH COMPANIES ERROR:", err);
+    console.error("FETCH COMPANIES FATAL:", err);
     res.status(500).json({ error: "Failed to fetch companies" });
   }
 });
@@ -130,14 +133,20 @@ router.get("/:companyId", async (req, res) => {
   try {
     const { companyId } = req.params;
 
-    const { rows } = await pool.query(
-      `SELECT * FROM companies WHERE id = $1`,
-      [companyId]
-    );
+    const { data, error } = await supabase
+      .from("companies")
+      .select("*")
+      .eq("id", companyId)
+      .single();
 
-    res.json(rows[0]);
+    if (error) {
+      console.error("FETCH COMPANY ERROR:", error);
+      return res.status(500).json({ error: "Company fetch failed" });
+    }
+
+    res.json(data);
   } catch (err) {
-    console.error("FETCH COMPANY ERROR:", err);
+    console.error("FETCH COMPANY FATAL:", err);
     res.status(500).json({ error: "Company fetch failed" });
   }
 });

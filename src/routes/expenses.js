@@ -1,13 +1,19 @@
 import express from "express";
-import { pool } from "../db/index.js";
+import { createClient } from "@supabase/supabase-js";
 import { requireCompany } from "../middleware/requireCompany.js";
 
 const router = express.Router();
 
-/*
-POST /api/expenses
-Creates a posted ledger entry + balanced ledger lines
-*/
+// Supabase client (SERVER SIDE ONLY)
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+
+/* =====================
+   CREATE EXPENSE
+   Creates a posted ledger entry + balanced ledger lines
+===================== */
 router.post("/", requireCompany, async (req, res) => {
   const {
     date,
@@ -20,13 +26,7 @@ router.post("/", requireCompany, async (req, res) => {
   const companyId = req.user.companyId;
 
   // HARD VALIDATION
-  if (
-    !companyId ||
-    !date ||
-    !description ||
-    !amount ||
-    !expenseAccountCode
-  ) {
+  if (!companyId || !date || !description || amount == null || !expenseAccountCode) {
     return res.status(400).json({ error: "Missing required fields" });
   }
 
@@ -35,117 +35,118 @@ router.post("/", requireCompany, async (req, res) => {
     return res.status(400).json({ error: "Invalid amount" });
   }
 
-  const client = await pool.connect();
-
   try {
-    await client.query("BEGIN");
+    // 1️⃣ Create ledger entry
+    const { data: entry, error: entryError } = await supabase
+      .from("ledger_entries")
+      .insert([
+        {
+          company_id: companyId,
+          date,
+          description,
+          status: "posted",
+          source_type: "expense",
+        },
+      ])
+      .select()
+      .single();
 
-    // 1️⃣ Ledger entry
-    const entryRes = await client.query(
-      `
-      INSERT INTO ledger_entries
-        (company_id, date, description, status, source_type)
-      VALUES
-        ($1, $2, $3, 'posted', 'expense')
-      RETURNING id
-      `,
-      [companyId, date, description]
-    );
+    if (entryError) throw entryError;
 
-    const entryId = entryRes.rows[0].id;
+    const entryId = entry.id;
 
-    // 2️⃣ Resolve account UUIDs safely
-    const accRes = await client.query(
-      `
-      SELECT id, code
-      FROM accounts
-      WHERE company_id = $1
-        AND code = ANY($2::int[])
-      `,
-      [
-        companyId,
-        [Number(expenseAccountCode), Number(paymentAccountCode)],
-      ]
-    );
+    // 2️⃣ Resolve account IDs
+    const { data: accountsData, error: accError } = await supabase
+      .from("accounts")
+      .select("id, code")
+      .eq("company_id", companyId)
+      .in("code", [Number(expenseAccountCode), Number(paymentAccountCode)]);
 
-    const accounts = Object.fromEntries(
-      accRes.rows.map((r) => [Number(r.code), r.id])
-    );
+    if (accError) throw accError;
+
+    const accounts = Object.fromEntries(accountsData.map(a => [Number(a.code), a.id]));
 
     if (!accounts[Number(expenseAccountCode)]) {
-      throw new Error(
-        `Expense account ${expenseAccountCode} not found for company`
-      );
+      throw new Error(`Expense account ${expenseAccountCode} not found for company`);
     }
 
     if (!accounts[Number(paymentAccountCode)]) {
-      throw new Error(
-        `Payment account ${paymentAccountCode} not found for company`
-      );
+      throw new Error(`Payment account ${paymentAccountCode} not found for company`);
     }
 
     // 3️⃣ Double-entry posting
-    await client.query(
-      `
-      INSERT INTO ledger_lines
-        (ledger_entry_id, account_id, debit, credit)
-      VALUES
-        ($1, $2, $3, 0),
-        ($1, $4, 0, $3)
-      `,
-      [
-        entryId,
-        accounts[Number(expenseAccountCode)], // Expense (Debit)
-        amt,
-        accounts[Number(paymentAccountCode)], // Cash / Bank (Credit)
-      ]
-    );
+    const { error: linesError } = await supabase
+      .from("ledger_lines")
+      .insert([
+        {
+          ledger_entry_id: entryId,
+          account_id: accounts[Number(expenseAccountCode)],
+          debit: amt,
+          credit: 0,
+        },
+        {
+          ledger_entry_id: entryId,
+          account_id: accounts[Number(paymentAccountCode)],
+          debit: 0,
+          credit: amt,
+        },
+      ]);
 
-    await client.query("COMMIT");
+    if (linesError) throw linesError;
+
     res.json({ success: true, entryId });
   } catch (err) {
-    await client.query("ROLLBACK");
-    console.error("EXPENSE ERROR:", err);
-    res.status(500).json({
-      error: err.message || "Failed to create expense",
-    });
-  } finally {
-    client.release();
+    console.error("EXPENSE ERROR:", err.message || err);
+    res.status(500).json({ error: err.message || "Failed to create expense" });
   }
 });
 
-/*
-GET recent expenses for logged-in company
-*/
+/* =====================
+   GET RECENT EXPENSES FOR COMPANY
+===================== */
 router.get("/company", requireCompany, async (req, res) => {
   const companyId = req.user.companyId;
+  const expenseAccountCodes = [5100, 5200, 5300, 5400, 5500];
 
   try {
-    const expenseAccountCodes = [5100, 5200, 5300, 5400, 5500];
+    const { data, error } = await supabase
+      .from("ledger_entries")
+      .select(`
+        id,
+        date,
+        description,
+        ledger_lines(
+          debit,
+          account_id,
+          accounts!inner(name, code)
+        )
+      `)
+      .eq("company_id", companyId)
+      .eq("source_type", "expense")
+      .order("date", { ascending: false });
 
-    const { rows } = await pool.query(
-      `
-      SELECT
-        le.id,
-        le.date,
-        le.description AS name,
-        a.name AS category,
-        ll.debit AS amount
-      FROM ledger_entries le
-      JOIN ledger_lines ll ON ll.ledger_entry_id = le.id
-      JOIN accounts a ON a.id = ll.account_id
-      WHERE le.company_id = $1
-        AND le.source_type = 'expense'
-        AND ll.debit > 0
-        AND a.code = ANY($2::int[])
-      ORDER BY le.date DESC
-      `,
-      [companyId, expenseAccountCodes]
-    );
+    if (error) throw error;
+
+    // Filter only relevant expense account codes
+    const rows = data
+      .map(le => {
+        const line = le.ledger_lines.find(
+          ll => expenseAccountCodes.includes(ll.accounts.code)
+        );
+        if (!line) return null;
+        return {
+          id: le.id,
+          date: le.date,
+          name: le.description,
+          category: line.accounts.name,
+          amount: line.debit,
+        };
+      })
+      .filter(Boolean);
 
     res.json(rows);
   } catch (err) {
-    console.error("EXPENSE FETCH ERROR:", err);
+    console.error("EXPENSE FETCH ERROR:", err.message || err);
     res.status(500).json({ error: "Failed to fetch expenses" });
   }
 });

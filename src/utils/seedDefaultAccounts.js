@@ -1,4 +1,4 @@
-export async function seedDefaultAccounts(client, companyId) {
+export async function seedDefaultAccounts(supabase, companyId) {
   const DEFAULT_ACCOUNTS = [
     // ASSETS
     { code: 1000, name: "Cash", type: "asset" },
@@ -21,14 +21,19 @@ export async function seedDefaultAccounts(client, companyId) {
     { code: 3000, name: "Owner's Equity", type: "equity" },
   ];
 
-  await client.query(
-    `
-    INSERT INTO accounts (company_id, code, name, type)
-    SELECT $1, a.code, a.name, a.type
-    FROM jsonb_to_recordset($2::jsonb)
-      AS a(code int, name text, type text)
-    ON CONFLICT (company_id, code) DO NOTHING
-    `,
-    [companyId, JSON.stringify(DEFAULT_ACCOUNTS)]
-  );
+  const rows = DEFAULT_ACCOUNTS.map((acc) => ({
+    company_id: companyId,
+    code: acc.code,
+    name: acc.name,
+    type: acc.type,
+  }));
+
+  const { error } = await supabase
+    .from("accounts")
+    .insert(rows, { ignoreDuplicates: true });
+
+  if (error) {
+    console.error("SEED DEFAULT ACCOUNTS ERROR:", error);
+    throw error;
+  }
 }

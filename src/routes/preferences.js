@@ -1,47 +1,61 @@
 import express from "express";
-import { pool } from "../db/index.js";
+import { supabase } from "../db/index.js";
 
 const router = express.Router();
 
-/* GET preferences */
+/* =====================
+   GET PREFERENCES
+===================== */
 router.get("/:companyId", async (req, res) => {
   try {
     const { companyId } = req.params;
-    const { rows } = await pool.query(
-      "SELECT * FROM company_preferences WHERE company_id = $1",
-      [companyId]
-    );
-    res.json(rows[0] || null);
+
+    const { data, error } = await supabase
+      .from("company_preferences")
+      .select("*")
+      .eq("company_id", companyId)
+      .single();
+
+    if (error && error.code !== "PGRST116") throw error; // no rows is fine
+
+    res.json(data || null);
   } catch (err) {
-    console.error(err);
+    console.error("FETCH PREFS ERROR:", err.message);
     res.status(500).json({ error: "Failed to fetch preferences" });
   }
 });
 
-/* CREATE/UPDATE preferences */
+/* =====================
+   CREATE / UPDATE PREFERENCES
+===================== */
 router.post("/", async (req, res) => {
   try {
     const { company_id, default_currency, timezone, date_format } = req.body;
-    if (!company_id) return res.status(400).json({ error: "company_id required" });
 
-    const { rows } = await pool.query(
-      `
-      INSERT INTO company_preferences (company_id, default_currency, timezone, date_format)
-      VALUES ($1,$2,$3,$4)
-      ON CONFLICT (company_id)
-      DO UPDATE SET
-        default_currency = EXCLUDED.default_currency,
-        timezone = EXCLUDED.timezone,
-        date_format = EXCLUDED.date_format,
-        updated_at = NOW()
-      RETURNING *
-      `,
-      [company_id, default_currency, timezone, date_format]
-    );
+    if (!company_id) {
+      return res.status(400).json({ error: "company_id required" });
+    }
 
-    res.json(rows[0]);
+    const { data, error } = await supabase
+      .from("company_preferences")
+      .upsert(
+        {
+          company_id,
+          default_currency,
+          timezone,
+          date_format,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "company_id" }
+      )
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.json(data);
   } catch (err) {
-    console.error(err);
+    console.error("SAVE PREFS ERROR:", err.message);
     res.status(500).json({ error: "Failed to save preferences" });
   }
 });

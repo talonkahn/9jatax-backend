@@ -1,5 +1,5 @@
 import express from "express";
-import { pool } from "../db/index.js";
+import { supabase } from "../db/index.js"; // ✅ FIXED IMPORT
 
 const router = express.Router();
 
@@ -21,38 +21,26 @@ router.post("/", async (req, res) => {
   }
 
   try {
-    const { rows } = await pool.query(
-      `
-      INSERT INTO company_tax_settings (
-        company_id,
-        vat_enabled,
-        vat_rate,
-        paye_enabled,
-        withholding_enabled,
-        stamp_duty_enabled
+    const { data, error } = await supabase
+      .from("company_tax_settings")
+      .upsert(
+        {
+          company_id,
+          vat_enabled,
+          vat_rate,
+          paye_enabled,
+          withholding_enabled,
+          stamp_duty_enabled,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "company_id" }
       )
-      VALUES ($1,$2,$3,$4,$5,$6)
-      ON CONFLICT (company_id)
-      DO UPDATE SET
-        vat_enabled = EXCLUDED.vat_enabled,
-        vat_rate = EXCLUDED.vat_rate,
-        paye_enabled = EXCLUDED.paye_enabled,
-        withholding_enabled = EXCLUDED.withholding_enabled,
-        stamp_duty_enabled = EXCLUDED.stamp_duty_enabled,
-        updated_at = NOW()
-      RETURNING *
-      `,
-      [
-        company_id,
-        vat_enabled,
-        vat_rate,
-        paye_enabled,
-        withholding_enabled,
-        stamp_duty_enabled,
-      ]
-    );
+      .select()
+      .single();
 
-    res.json(rows[0]);
+    if (error) throw error;
+
+    res.json(data);
   } catch (err) {
     console.error("TAX SETTINGS ERROR:", err.message);
     res.status(500).json({ error: "Failed to save tax settings" });
@@ -65,16 +53,20 @@ GET tax settings for company
 router.get("/:companyId", async (req, res) => {
   const { companyId } = req.params;
 
-  const { rows } = await pool.query(
-    `
-    SELECT *
-    FROM company_tax_settings
-    WHERE company_id = $1
-    `,
-    [companyId]
-  );
+  try {
+    const { data, error } = await supabase
+      .from("company_tax_settings")
+      .select("*")
+      .eq("company_id", companyId)
+      .single();
 
-  res.json(rows[0] || null);
+    if (error && error.code !== "PGRST116") throw error;
+
+    res.json(data || null);
+  } catch (err) {
+    console.error("GET TAX SETTINGS ERROR:", err.message);
+    res.status(500).json({ error: "Failed to fetch tax settings" });
+  }
 });
 
 export default router;

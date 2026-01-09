@@ -1,63 +1,87 @@
 import express from "express";
-import { pool } from "../db/index.js";
+import { createClient } from "@supabase/supabase-js";
 import { requireCompany } from "../middleware/requireCompany.js";
 
 const router = express.Router();
+
+// Supabase client (SERVER SIDE ONLY)
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
 /* =====================
    DASHBOARD TOTALS
 ===================== */
 router.get("/dashboard", requireCompany, async (req, res) => {
   const companyId = req.user.companyId;
-
   try {
-    const incomeRes = await pool.query(
-      `SELECT COALESCE(SUM(ll.credit),0) AS income
-       FROM ledger_entries le
-       JOIN ledger_lines ll ON ll.ledger_entry_id = le.id
-       JOIN accounts a ON a.id = ll.account_id
-       WHERE le.company_id=$1 AND le.status='posted' AND a.code BETWEEN 4000 AND 4999`,
-      [companyId]
-    );
+    // Income
+    const { data: incomeData, error: incomeErr } = await supabase
+      .from("ledger_entries")
+      .select(`
+        ledger_lines (
+          debit, credit,
+          account_id
+        )
+      `)
+      .eq("company_id", companyId)
+      .eq("status", "posted");
 
-    const expenseRes = await pool.query(
-      `SELECT COALESCE(SUM(ll.debit),0) AS expenses
-       FROM ledger_entries le
-       JOIN ledger_lines ll ON ll.ledger_entry_id = le.id
-       JOIN accounts a ON a.id = ll.account_id
-       WHERE le.company_id=$1 AND le.status='posted' AND a.code BETWEEN 5000 AND 5999`,
-      [companyId]
-    );
+    if (incomeErr) throw incomeErr;
 
-    const recentRes = await pool.query(
-      `SELECT le.id, le.date, le.description, le.source_type,
-        SUM(CASE WHEN a.code BETWEEN 4000 AND 4999 THEN ll.credit
-                 WHEN a.code BETWEEN 5000 AND 5999 THEN ll.debit ELSE 0 END) AS amount,
-        CASE WHEN MAX(a.code) BETWEEN 5000 AND 5999 THEN 'Expense' ELSE 'Income' END AS type
-       FROM ledger_entries le
-       JOIN ledger_lines ll ON ll.ledger_entry_id = le.id
-       JOIN accounts a ON a.id = ll.account_id
-       WHERE le.company_id=$1 AND le.status='posted'
-       GROUP BY le.id, le.date, le.description, le.source_type
-       ORDER BY le.date DESC
-       LIMIT 10`,
-      [companyId]
-    );
+    // Flatten ledger lines and filter accounts
+    const allLines = [];
+    for (const le of incomeData) {
+      if (!le.ledger_lines) continue;
+      allLines.push(...le.ledger_lines);
+    }
 
-    const invoiceRes = await pool.query(
-      `SELECT COUNT(*)::int AS count FROM invoices WHERE company_id=$1`,
-      [companyId]
-    );
+    // Fetch all relevant accounts
+    const { data: accountsData, error: accErr } = await supabase
+      .from("accounts")
+      .select("id, code, name")
+      .eq("company_id", companyId);
 
-    const income = Number(incomeRes.rows[0].income);
-    const expenses = Number(expenseRes.rows[0].expenses);
+    if (accErr) throw accErr;
+
+    const accounts = Object.fromEntries(accountsData.map(a => [a.id, a.code]));
+
+    const income = allLines
+      .filter(l => accounts[l.account_id] >= 4000 && accounts[l.account_id] <= 4999)
+      .reduce((sum, l) => sum + Number(l.credit || 0), 0);
+
+    const expenses = allLines
+      .filter(l => accounts[l.account_id] >= 5000 && accounts[l.account_id] <= 5999)
+      .reduce((sum, l) => sum + Number(l.debit || 0), 0);
+
+    // Recent transactions
+    const recent = allLines
+      .map(l => {
+        const code = accounts[l.account_id];
+        return {
+          ...l,
+          type: code >= 5000 && code <= 5999 ? "Expense" : "Income",
+          amount: code >= 5000 && code <= 5999 ? l.debit : l.credit
+        };
+      })
+      .slice(-10)
+      .reverse();
+
+    // Invoices count
+    const { count: invoiceCount, error: invoiceErr } = await supabase
+      .from("invoices")
+      .select("*", { count: "exact", head: true })
+      .eq("company_id", companyId);
+
+    if (invoiceErr) throw invoiceErr;
 
     res.json({
       income,
       expenses,
       profit: income - expenses,
-      invoices: invoiceRes.rows[0].count,
-      recent: recentRes.rows,
+      invoices: invoiceCount || 0,
+      recent
     });
   } catch (err) {
     console.error("DASHBOARD ERROR:", err);
@@ -70,24 +94,39 @@ router.get("/dashboard", requireCompany, async (req, res) => {
 ===================== */
 router.get("/income-statement", requireCompany, async (req, res) => {
   const companyId = req.user.companyId;
-
   try {
-    const { rows } = await pool.query(
-      `SELECT
-         CASE WHEN a.code BETWEEN 4000 AND 4999 THEN 'income'
-              WHEN a.code BETWEEN 5000 AND 5999 THEN 'expense' END AS category,
-         SUM(CASE WHEN a.code BETWEEN 4000 AND 4999 THEN ll.credit
-                  WHEN a.code BETWEEN 5000 AND 5999 THEN ll.debit END) AS amount
-       FROM ledger_entries le
-       JOIN ledger_lines ll ON ll.ledger_entry_id = le.id
-       JOIN accounts a ON a.id = ll.account_id
-       WHERE le.company_id=$1 AND le.status='posted' AND a.code BETWEEN 4000 AND 5999
-       GROUP BY category`,
-      [companyId]
-    );
+    const { data: ledgerData, error } = await supabase
+      .from("ledger_entries")
+      .select(`
+        ledger_lines (
+          debit, credit,
+          account_id
+        )
+      `)
+      .eq("company_id", companyId)
+      .eq("status", "posted");
 
-    const income = Number(rows.find(r => r.category === "income")?.amount || 0);
-    const expenses = Number(rows.find(r => r.category === "expense")?.amount || 0);
+    if (error) throw error;
+
+    const accountsRes = await supabase
+      .from("accounts")
+      .select("id, code")
+      .eq("company_id", companyId);
+
+    if (accountsRes.error) throw accountsRes.error;
+
+    const accounts = Object.fromEntries(accountsRes.data.map(a => [a.id, a.code]));
+
+    let income = 0;
+    let expenses = 0;
+
+    for (const le of ledgerData) {
+      for (const l of le.ledger_lines || []) {
+        const code = accounts[l.account_id];
+        if (code >= 4000 && code <= 4999) income += Number(l.credit || 0);
+        if (code >= 5000 && code <= 5999) expenses += Number(l.debit || 0);
+      }
+    }
 
     res.json({ income, expenses, profit: income - expenses });
   } catch (err) {
@@ -101,53 +140,79 @@ router.get("/income-statement", requireCompany, async (req, res) => {
 ===================== */
 router.get("/balance-sheet", requireCompany, async (req, res) => {
   const companyId = req.user.companyId;
-
   try {
-    // 1️⃣ Fetch account balances
-    const { rows } = await pool.query(
-      `SELECT a.id, a.name, a.code,
-          CASE WHEN a.code BETWEEN 1000 AND 1999 THEN 'asset'
-               WHEN a.code BETWEEN 2000 AND 2999 THEN 'liability'
-               WHEN a.code BETWEEN 3000 AND 3999 THEN 'equity' END AS category,
-          SUM(COALESCE(ll.debit,0) - COALESCE(ll.credit,0)) AS balance
-       FROM accounts a
-       LEFT JOIN ledger_lines ll ON ll.account_id = a.id
+    const { data: accountsData, error: accErr } = await supabase
+      .from("accounts")
+      .
+select("id, code, name")
+      .eq("company_id", companyId);
 
-LEFT JOIN ledger_entries le ON ll.ledger_entry_id = le.id AND le.status='posted'
-       WHERE a.company_id=$1 AND a.code BETWEEN 1000 AND 3999
-       GROUP BY a.id, a.name, a.code`,
-      [companyId]
-    );
+    if (accErr) throw accErr;
 
-    // 2️⃣ Fetch net profit to include in equity
-    const incomeStmt = await pool.query(
-      `SELECT
-         SUM(CASE WHEN a.code BETWEEN 4000 AND 4999 THEN ll.credit ELSE 0 END) -
-         SUM(CASE WHEN a.code BETWEEN 5000 AND 5999 THEN ll.debit ELSE 0 END) AS net_profit
-       FROM ledger_entries le
-       JOIN ledger_lines ll ON ll.ledger_entry_id = le.id
-       JOIN accounts a ON a.id = ll.account_id
-       WHERE le.company_id=$1 AND le.status='posted' AND a.code BETWEEN 4000 AND 5999`,
-      [companyId]
-    );
-    const netProfit = Number(incomeStmt.rows[0]?.net_profit || 0);
+    const { data: ledgerData, error: ledgerErr } = await supabase
+      .from("ledger_entries")
+      .select(`
+        ledger_lines (
+          debit, credit,
+          account_id
+        )
+      `)
+      .eq("company_id", companyId)
+      .eq("status", "posted");
 
-    // 3️⃣ Aggregate totals per category
-    const totals = { asset: 0, liability: 0, equity: 0 };
-    rows.forEach(r => {
-      const cat = r.category;
-      let bal = Number(r.balance || 0);
+    if (ledgerErr) throw ledgerErr;
 
-      if (cat === 'liability' || cat === 'equity') bal = -bal; // flip sign
-      totals[cat] += bal;
-    });
+    const balances = {};
+    for (const acc of accountsData) balances[acc.id] = 0;
 
-    totals.equity += netProfit; // include net profit in equity
+    for (const le of ledgerData) {
+      for (const l of le.ledger_lines || []) {
+        balances[l.account_id] += Number(l.debit || 0) - Number(l.credit || 0);
+      }
+    }
+
+    let totals = { asset: 0, liability: 0, equity: 0 };
+
+    for (const acc of accountsData) {
+      let bal = balances[acc.id] || 0;
+      let category = null;
+      if (acc.code >= 1000 && acc.code <= 1999) category = "asset";
+      else if (acc.code >= 2000 && acc.code <= 2999) category = "liability";
+      else if (acc.code >= 3000 && acc.code <= 3999) category = "equity";
+
+      if (category === "liability" || category === "equity") bal = -bal;
+      if (category) totals[category] += bal;
+    }
+
+    // Net profit
+    const { data: incomeData, error: incErr } = await supabase
+      .from("ledger_entries")
+      .select(`
+        ledger_lines (
+          debit, credit,
+          account_id
+        )
+      `)
+      .eq("company_id", companyId)
+      .eq("status", "posted");
+
+    if (incErr) throw incErr;
+
+    let netProfit = 0;
+    for (const le of incomeData) {
+      for (const l of le.ledger_lines || []) {
+        const code = accountsData.find(a => a.id === l.account_id)?.code || 0;
+        if (code >= 4000 && code <= 4999) netProfit += Number(l.credit || 0);
+        if (code >= 5000 && code <= 5999) netProfit -= Number(l.debit || 0);
+      }
+    }
+
+    totals.equity += netProfit;
 
     res.json([
-      { category: 'asset', balance: totals.asset },
-      { category: 'liability', balance: totals.liability },
-      { category: 'equity', balance: totals.equity },
+      { category: "asset", balance: totals.asset },
+      { category: "liability", balance: totals.liability },
+      { category: "equity", balance: totals.equity },
     ]);
   } catch (err) {
     console.error("BALANCE SHEET ERROR:", err);
@@ -161,29 +226,50 @@ LEFT JOIN ledger_entries le ON ll.ledger_entry_id = le.id AND le.status='posted'
 router.get("/vat", requireCompany, async (req, res) => {
   const companyId = req.user.companyId;
   const year = new Date().getFullYear();
-
   try {
-    const companyRes = await pool.query(
-      `SELECT id, name, tin, rc, industry, vat_registered
-       FROM companies
-       WHERE id=$1`,
-      [companyId]
-    );
+    const { data: company, error: compErr } = await supabase
+      .from("companies")
+      .select("id, name, tin, rc, industry, vat_registered")
+      .eq("id", companyId)
+      .single();
 
-    const vatRes = await pool.query(
-      `SELECT date_trunc('month', le.date) AS month,
-              SUM(ll.credit - ll.debit) AS vat_amount
-       FROM ledger_entries le
-       JOIN ledger_lines ll ON ll.ledger_entry_id = le.id
-       JOIN accounts a ON a.id = ll.account_id
-       WHERE le.company_id=$1 AND le.status='posted' AND a.code=2100
-         AND EXTRACT(YEAR FROM le.date)=$2
-       GROUP BY month
-       ORDER BY month`,
-      [companyId, year]
-    );
+    if (compErr) throw compErr;
 
-    res.json({ company: companyRes.rows[0], vat: vatRes.rows });
+    const { data: vatData, error: vatErr } = await supabase
+      .from("ledger_entries")
+      .select(`
+        date,
+        ledger_lines (
+          debit, credit,
+          account_id
+        )
+      `)
+      .eq("company_id", companyId)
+      .eq("status", "posted");
+
+    if (vatErr) throw vatErr;
+
+    // Fetch account code 2100
+    const { data: accounts, error: accErr } = await supabase
+      .from("accounts")
+      .select("id, code")
+      .eq("company_id", companyId);
+
+    if (accErr) throw accErr;
+    const vatAccountId = accounts.find(a => a.code === 2100)?.id;
+
+    const vatReport = [];
+
+    for (const le of vatData) {
+      const month = new Date(le.date).getMonth() + 1;
+      let vatAmount = 0;
+      for (const l of le.ledger_lines || []) {
+        if (l.account_id === vatAccountId) vatAmount += Number(l.credit || 0) - Number(l.debit || 0);
+      }
+      if (vatAmount !== 0) vatReport.push({ month, vat_amount: vatAmount });
+    }
+
+    res.json({ company, vat: vatReport });
   } catch (err) {
     console.error("VAT REPORT ERROR:", err);
     res.status(500).json({ error: "VAT report failed" });
