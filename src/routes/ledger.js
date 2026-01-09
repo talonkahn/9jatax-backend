@@ -80,8 +80,8 @@ router.post("/from-invoice", requireCompany, async (req, res) => {
 
     res.json({ success: true, entryId });
   } catch (err) {
-    console.error("LEDGER INVOICE ERROR:", err.message || err);
-    res.status(500).json({ error: err.message || "Failed to create ledger entry" });
+    console.error("LEDGER INVOICE ERROR:", err.message, err);
+    res.status(500).json({ error: "Failed to create ledger entry" });
   }
 });
 
@@ -120,14 +120,14 @@ router.get("/", requireCompany, async (req, res) => {
       lines: le.ledger_lines.map(ll => ({
         account_code: ll.accounts.code,
         account_name: ll.accounts.name,
-        debit: ll.debit,
-        credit: ll.credit,
-      })).sort((a,b) => a.account_code - b.account_code),
+        debit: ll.debit || 0,
+        credit: ll.credit || 0,
+      })).sort((a, b) => a.account_code - b.account_code),
     }));
 
     res.json(rows);
   } catch (err) {
-    console.error("LEDGER FETCH ERROR:", err.message || err);
+    console.error("LEDGER FETCH ERROR:", err.message, err);
     res.status(500).json({ error: "Failed to fetch ledger" });
   }
 });
@@ -148,9 +148,9 @@ router.get("/company/:companyId", async (req, res) => {
         status,
         source_type,
         ledger_lines(
+          debit,
 
-debit,
-          credit,
+credit,
           accounts!inner(code, name)
         )
       `)
@@ -169,14 +169,14 @@ debit,
       lines: le.ledger_lines.map(ll => ({
         account_code: ll.accounts.code,
         account_name: ll.accounts.name,
-        debit: ll.debit,
-        credit: ll.credit,
-      })).sort((a,b) => a.account_code - b.account_code),
+        debit: ll.debit || 0,
+        credit: ll.credit || 0,
+      })).sort((a, b) => a.account_code - b.account_code),
     }));
 
     res.json(rows);
   } catch (err) {
-    console.error("LEDGER COMPANY FETCH ERROR:", err.message || err);
+    console.error("LEDGER COMPANY FETCH ERROR:", err.message, err);
     res.status(500).json({ error: "Failed to fetch ledger for company" });
   }
 });
@@ -214,7 +214,7 @@ router.get("/recent", requireCompany, async (req, res) => {
 
     res.json(rows);
   } catch (err) {
-    console.error("RECENT LEDGER ERROR:", err.message || err);
+    console.error("RECENT LEDGER ERROR:", err.message, err);
     res.status(500).json({ error: "Failed to fetch recent activity" });
   }
 });

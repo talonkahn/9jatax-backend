@@ -76,7 +76,7 @@ router.post("/login", async (req, res) => {
       .from("users")
       .select("*")
       .eq("email", email)
-      .single();
+      .maybeSingle();
 
     if (error || !user) {
       return res.status(401).json({ error: "Invalid credentials" });
