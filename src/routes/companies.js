@@ -18,7 +18,6 @@ const JWT_SECRET = process.env.JWT_SECRET || "supersecretvalue123";
 ===================== */
 router.post("/", async (req, res) => {
   try {
-    // ✅ Extract JWT from header
     const authHeader = req.headers.authorization;
     let owner_user_id = null;
 
@@ -27,12 +26,12 @@ router.post("/", async (req, res) => {
         const token = authHeader.split(" ")[1];
         const decoded = jwt.verify(token, JWT_SECRET);
         owner_user_id = decoded.userId;
-      } catch (err) {
-        console.warn("JWT invalid or missing, will fallback to req.body.owner_user_id");
+      } catch {
+        console.warn("JWT invalid, falling back to body user id");
       }
     }
 
-    // ✅ fallback to req.body.owner_user_id (for old users)
+    // fallback for legacy users
     owner_user_id = owner_user_id || req.body.owner_user_id;
 
     const { name, tin, rc, industry, vat_registered } = req.body;
@@ -41,18 +40,10 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    // 1️⃣ Create company
     const { data: company, error: companyError } = await supabase
       .from("companies")
       .insert([
-        {
-          owner_user_id,
-          name,
-          tin,
-          rc,
-          industry,
-          vat_registered,
-        },
+        { owner_user_id, name, tin, rc, industry, vat_registered },
       ])
       .select()
       .single();
@@ -62,15 +53,10 @@ router.post("/", async (req, res) => {
       return res.status(500).json({ error: "Failed to create company" });
     }
 
-    // 2️⃣ Assign Admin role
     const { error: roleError } = await supabase
       .from("company_users")
       .insert([
-        {
-          company_id: company.id,
-          user_id: owner_user_id,
-          role: "Admin",
-        },
+        { company_id: company.id, user_id: owner_user_id, role: "Admin" },
       ]);
 
     if (roleError) {
@@ -78,7 +64,6 @@ router.post("/", async (req, res) => {
       return res.status(500).json({ error: "Failed to assign role" });
     }
 
-    // 3️⃣ Seed default chart of accounts
     await seedDefaultAccounts(supabase, company.id);
 
     res.json(company);
@@ -92,12 +77,14 @@ router.post("/", async (req, res) => {
    GET CURRENT USER COMPANY
 ===================== */
 router.get("/me", async (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) return res.status(401).json({ error: "No token" });
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: "No token" });
 
-  const token = authHeader.split(" ")[1];
-  const decoded = jwt.verify(token, JWT_SECRET);
-  const userId = decoded.userId;
+    const token = authHeader.split(" ")[1];
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const userId = decoded.userId;
+
     const { data, error } = await supabase
       .from("company_users")
       .select("companies(*)")
@@ -106,9 +93,7 @@ router.get("/me", async (req, res) => {
       .limit(1)
       .single();
 
-    if (error || !data) {
-      return res.json(null);
-    }
+    if (error || !data) return res.json(null);
 
     res.json(data.companies);
   } catch (err) {
@@ -157,14 +142,14 @@ router.get("/:companyId", async (req, res) => {
 
     if (error) {
       console.error("FETCH COMPANY ERROR:", error);
-      return res.status(500).
-
-json({ error: "Company fetch failed" });
+      return res.status(500).json({ error: "Company fetch failed" });
     }
 
     res.json(data);
   } catch (err) {
-    console.error("FETCH COMPANY FATAL:", err);
+    console.
+
+error("FETCH COMPANY FATAL:", err);
     res.status(500).json({ error: "Company fetch failed" });
   }
 });
