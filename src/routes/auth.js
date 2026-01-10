@@ -146,7 +146,7 @@ router.post("/refresh", (req, res) => {
     const { userId, companyId, role } = decoded;
 
     const newToken = jwt.sign(
-      { userId, companyId: companyId  null, role: role  "Viewer" },
+      { userId, companyId: companyId || null, role: role || "Viewer" },
       JWT_SECRET,
 
 { expiresIn: TOKEN_EXPIRY }
@@ -154,7 +154,7 @@ router.post("/refresh", (req, res) => {
 
     res.json({
       token: newToken,
-      user: { id: userId, company_id: companyId  null, role: role  "Viewer" },
+      user: { id: userId, company_id: companyId || null, role: role || "Viewer" },
     });
   } catch (err) {
     console.error("REFRESH ERROR:", err.message);
