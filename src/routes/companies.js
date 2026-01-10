@@ -11,36 +11,21 @@ const supabase = createClient(
 );
 
 /* =====================
-   CREATE COMPANY
+   CREATE COMPANY (ONBOARDING)
 ===================== */
 router.post("/", async (req, res) => {
   try {
-    const {
-      owner_user_id,
-      name,
-      tin,
-      rc,
-      industry,
-      vat_registered,
-    } = req.body;
+    const { user_id, name } = req.body;
 
-    if (!owner_user_id || !name) {
+    // ✅ STRICT + CORRECT validation
+    if (!user_id || !name) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    // 1️⃣ Create company
+    // 1️⃣ Create company (ONLY fields that exist)
     const { data: company, error: companyError } = await supabase
       .from("companies")
-      .insert([
-        {
-          owner_user_id,
-          name,
-          tin,
-          rc,
-          industry,
-          vat_registered,
-        },
-      ])
+      .insert([{ name }])
       .select()
       .single();
 
@@ -49,20 +34,15 @@ router.post("/", async (req, res) => {
       return res.status(500).json({ error: "Failed to create company" });
     }
 
-    // 2️⃣ Assign Admin role
-    const { error: roleError } = await supabase
-      .from("company_users")
-      .insert([
-        {
-          company_id: company.id,
-          user_id: owner_user_id,
-          role: "Admin",
-        },
-      ]);
+    // 2️⃣ Attach company to user
+    const { error: userUpdateError } = await supabase
+      .from("users")
+      .update({ company_id: company.id })
+      .eq("id", user_id);
 
-    if (roleError) {
-      console.error("ASSIGN ROLE ERROR:", roleError);
-      return res.status(500).json({ error: "Failed to assign role" });
+    if (userUpdateError) {
+      console.error("USER UPDATE ERROR:", userUpdateError);
+      return res.status(500).json({ error: "Failed to link company to user" });
     }
 
     // 3️⃣ Seed default chart of accounts
@@ -82,47 +62,30 @@ router.get("/me/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
 
-    const { data, error } = await supabase
-      .from("company_users")
-      .select("companies(*)")
-      .eq("user_id", userId)
-      .order("created_at", { ascending: false })
-      .limit(1)
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("company_id")
+      .eq("id", userId)
       .single();
 
-    if (error || !data) {
+    if (error || !user?.company_id) {
       return res.json(null);
     }
 
-    res.json(data.companies);
+    const { data: company, error: companyError } = await supabase
+      .from("companies")
+      .select("*")
+      .eq("id", user.company_id)
+      .single();
+
+    if (companyError) {
+      return res.status(500).json({ error: "Failed to fetch company" });
+    }
+
+    res.json(company);
   } catch (err) {
     console.error("FETCH MY COMPANY ERROR:", err);
     res.status(500).json({ error: "Failed to fetch company" });
-  }
-});
-
-/* =====================
-   GET COMPANIES BY OWNER
-===================== */
-router.get("/owner/:userId", async (req, res) => {
-  try {
-    const { userId } = req.params;
-
-    const { data, error } = await supabase
-      .from("companies")
-      .select("*")
-      .eq("owner_user_id", userId)
-      .order("created_at", { ascending: false });
-
-    if (error) {
-      console.error("FETCH COMPANIES ERROR:", error);
-      return res.status(500).json({ error: "Failed to fetch companies" });
-    }
-
-    res.json(data);
-  } catch (err) {
-    console.error("FETCH COMPANIES FATAL:", err);
-    res.status(500).json({ error: "Failed to fetch companies" });
   }
 });
 
