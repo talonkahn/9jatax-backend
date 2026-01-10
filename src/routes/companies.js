@@ -48,11 +48,13 @@ router.post("/", async (req, res) => {
       .select()
       .single();
 
-    if (companyError) {
-      console.error("CREATE COMPANY ERROR:", companyError);
-      return res.status(500).json({ error: "Failed to create company" });
-    }
-
+if (companyError) {
+  console.error("CREATE COMPANY ERROR FULL:", companyError);
+  return res.status(500).json({
+    error: companyError.message,
+    details: companyError,
+  });
+}
     const { error: roleError } = await supabase
       .from("company_users")
       .insert([
