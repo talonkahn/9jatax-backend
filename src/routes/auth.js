@@ -31,16 +31,11 @@ router.post("/signup", async (req, res) => {
     }
 
     // Check if user already exists
-    const { data: existingUser, error: checkError } = await supabase
+    const { data: existingUser } = await supabase
       .from("users")
       .select("id")
       .eq("email", email)
-      .single();
-
-    if (checkError && checkError.code !== "PGRST116") {
-      console.error("CHECK USER ERROR:", checkError);
-      return res.status(500).json({ error: "Signup failed" });
-    }
+      .maybeSingle();
 
     if (existingUser) {
       return res.status(409).json({ error: "User already exists" });
@@ -49,21 +44,21 @@ router.post("/signup", async (req, res) => {
     // Hash password
     const hash = await bcrypt.hash(password, 10);
 
-    // Insert user into Supabase
-    const { data: newUser, error: insertError } = await supabase
+    // Insert user
+    const { data: newUser, error } = await supabase
       .from("users")
       .insert([{ email, password_hash: hash, name }])
       .select()
-      .single();
+      .maybeSingle();
 
-    if (insertError || !newUser) {
-      console.error("SIGNUP ERROR:", insertError);
+    if (error || !newUser) {
+      console.error("SIGNUP ERROR:", error);
       return res.status(500).json({ error: "Signup failed" });
     }
 
-    // Generate JWT
+    // Save user ID in JWT
     const token = jwt.sign(
-      { userId: newUser.id, companyId: null, role: "Viewer" },
+      { userId: newUser.id, companyId: newUser.company_id || null, role: "Viewer" },
       JWT_SECRET,
       { expiresIn: TOKEN_EXPIRY }
     );
@@ -74,7 +69,7 @@ router.post("/signup", async (req, res) => {
         id: newUser.id,
         email: newUser.email,
         name: newUser.name,
-        company_id: null,
+        company_id: newUser.company_id || null,
         role: "Viewer",
       },
     });
@@ -94,21 +89,18 @@ router.post("/login", async (req, res) => {
       return res.status(400).json({ error: "Missing fields" });
     }
 
-    // Fetch user by email
     const { data: user, error } = await supabase
       .from("users")
       .select("*")
       .eq("email", email)
-      .single();
+      .maybeSingle();
 
-    if (error || !user) {
-      return res.status(401).json({ error: "Invalid credentials" });
-    }
+    if (error || !user) return res.status(401).json({ error: "Invalid credentials" });
 
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) return res.status(401).json({ error: "Invalid credentials" });
 
-    // Generate JWT
+    // JWT
     const token = jwt.sign(
       { userId: user.id, companyId: user.company_id || null, role: "Viewer" },
       JWT_SECRET,
@@ -148,8 +140,7 @@ router.post("/refresh", (req, res) => {
     const newToken = jwt.sign(
       { userId, companyId: companyId || null, role: role || "Viewer" },
       JWT_SECRET,
-
-{ expiresIn: TOKEN_EXPIRY }
+      { expiresIn: TOKEN_EXPIRY }
     );
 
     res.json({
@@ -157,7 +148,9 @@ router.post("/refresh", (req, res) => {
       user: { id: userId, company_id: companyId || null, role: role || "Viewer" },
     });
   } catch (err) {
-    console.error("REFRESH ERROR:", err.message);
+    console.error("REFRESH ERROR:", err.
+
+message);
     res.status(401).json({ error: "Invalid token" });
   }
 });
