@@ -20,19 +20,22 @@ router.post("/", async (req, res) => {
   try {
     // ✅ Extract JWT from header
     const authHeader = req.headers.authorization;
-    if (!authHeader) return res.status(401).json({ error: "No token provided" });
+    let owner_user_id = null;
 
-    const token = authHeader.split(" ")[1];
-    const decoded = jwt.verify(token, JWT_SECRET);
-    const owner_user_id = decoded.userId; // ✅ take from JWT
+    if (authHeader) {
+      try {
+        const token = authHeader.split(" ")[1];
+        const decoded = jwt.verify(token, JWT_SECRET);
+        owner_user_id = decoded.userId;
+      } catch (err) {
+        console.warn("JWT invalid or missing, will fallback to req.body.owner_user_id");
+      }
+    }
 
-    const {
-      name,
-      tin,
-      rc,
-      industry,
-      vat_registered,
-    } = req.body;
+    // ✅ fallback to req.body.owner_user_id (for old users)
+    owner_user_id = owner_user_id || req.body.owner_user_id;
+
+    const { name, tin, rc, industry, vat_registered } = req.body;
 
     if (!owner_user_id || !name) {
       return res.status(400).json({ error: "Missing required fields" });
@@ -151,15 +154,16 @@ router.get("/:companyId", async (req, res) => {
 
     if (error) {
       console.error("FETCH COMPANY ERROR:", error);
-      return res.status(500).json({ error: "Company fetch failed" });
+      return res.status(500).
+
+json({ error: "Company fetch failed" });
     }
 
     res.json(data);
   } catch (err) {
     console.error("FETCH COMPANY FATAL:", err);
     res.status(500).json({ error: "Company fetch failed" });
-
-}
+  }
 });
 
 export default router;
