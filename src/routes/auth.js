@@ -9,7 +9,8 @@ const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || "supersecretvalue123";
 const TOKEN_EXPIRY = "7d";
 
-const SUPABASE_URL = process.env.SUPABASE_URL || "https://ongxymhxgpejiqbissad.supabase.co";
+const SUPABASE_URL =
+  process.env.SUPABASE_URL || "https://ongxymhxgpejiqbissad.supabase.co";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 if (!SUPABASE_SERVICE_ROLE_KEY) {
   console.error("❌ SUPABASE_SERVICE_ROLE_KEY missing in .env");
@@ -30,11 +31,16 @@ router.post("/signup", async (req, res) => {
     }
 
     // Check if user already exists
-    const { data: existingUser } = await supabase
+    const { data: existingUser, error: checkError } = await supabase
       .from("users")
       .select("id")
       .eq("email", email)
-      .maybeSingle();
+      .single();
+
+    if (checkError && checkError.code !== "PGRST116") {
+      console.error("CHECK USER ERROR:", checkError);
+      return res.status(500).json({ error: "Signup failed" });
+    }
 
     if (existingUser) {
       return res.status(409).json({ error: "User already exists" });
@@ -44,30 +50,36 @@ router.post("/signup", async (req, res) => {
     const hash = await bcrypt.hash(password, 10);
 
     // Insert user into Supabase
-    const { data, error } = await supabase
+    const { data: newUser, error: insertError } = await supabase
       .from("users")
       .insert([{ email, password_hash: hash, name }])
       .select()
-      .maybeSingle();
+      .single();
 
-    if (error || !data) {
-      console.error("SIGNUP ERROR:", error);
+    if (insertError || !newUser) {
+      console.error("SIGNUP ERROR:", insertError);
       return res.status(500).json({ error: "Signup failed" });
     }
 
     // Generate JWT
     const token = jwt.sign(
-      { userId: data.id, companyId: null, role: "Viewer" },
+      { userId: newUser.id, companyId: null, role: "Viewer" },
       JWT_SECRET,
       { expiresIn: TOKEN_EXPIRY }
     );
 
     res.json({
       token,
-      user: { id: data.id, email: data.email, name: data.name, company_id: null, role: "Viewer" },
+      user: {
+        id: newUser.id,
+        email: newUser.email,
+        name: newUser.name,
+        company_id: null,
+        role: "Viewer",
+      },
     });
   } catch (err) {
-    console.error("SIGNUP ERROR:", err);
+    console.error("SIGNUP FATAL ERROR:", err);
     res.status(500).json({ error: "Signup failed" });
   }
 });
@@ -87,7 +99,7 @@ router.post("/login", async (req, res) => {
       .from("users")
       .select("*")
       .eq("email", email)
-      .maybeSingle();
+      .single();
 
     if (error || !user) {
       return res.status(401).json({ error: "Invalid credentials" });
@@ -98,14 +110,20 @@ router.post("/login", async (req, res) => {
 
     // Generate JWT
     const token = jwt.sign(
-      { userId: user.id, companyId: null, role: "Viewer" },
+      { userId: user.id, companyId: user.company_id || null, role: "Viewer" },
       JWT_SECRET,
       { expiresIn: TOKEN_EXPIRY }
     );
 
     res.json({
       token,
-      user: { id: user.id, email: user.email, name: user.name, company_id: null, role: "Viewer" },
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        company_id: user.company_id || null,
+        role: "Viewer",
+      },
     });
   } catch (err) {
     console.error("LOGIN ERROR:", err);
@@ -125,15 +143,18 @@ router.post("/refresh", (req, res) => {
     if (!token) return res.status(401).json({ error: "No token provided" });
 
     const decoded = jwt.verify(token, JWT_SECRET);
-    const { userId } = decoded;
+    const { userId, companyId, role } = decoded;
 
-    const newToken = jwt.sign({ userId, companyId: null, role: "Viewer" }, JWT_SECRET, {
-      expiresIn: TOKEN_EXPIRY,
-    });
+    const newToken = jwt.sign(
+      { userId, companyId: companyId  null, role: role  "Viewer" },
+      JWT_SECRET,
+
+{ expiresIn: TOKEN_EXPIRY }
+    );
 
     res.json({
       token: newToken,
-      user: { id: userId, company_id: null, role: "Viewer" },
+      user: { id: userId, company_id: companyId  null, role: role  "Viewer" },
     });
   } catch (err) {
     console.error("REFRESH ERROR:", err.message);
