@@ -91,10 +91,13 @@ router.post("/", async (req, res) => {
 /* =====================
    GET CURRENT USER COMPANY
 ===================== */
-router.get("/me/:userId", async (req, res) => {
-  try {
-    const { userId } = req.params;
+router.get("/me", async (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) return res.status(401).json({ error: "No token" });
 
+  const token = authHeader.split(" ")[1];
+  const decoded = jwt.verify(token, JWT_SECRET);
+  const userId = decoded.userId;
     const { data, error } = await supabase
       .from("company_users")
       .select("companies(*)")
