@@ -40,35 +40,41 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
+    // 1️⃣ Create company
     const { data: company, error: companyError } = await supabase
       .from("companies")
-      .insert([
-        { owner_user_id, name, tin, rc, industry, vat_registered },
-      ])
+      .insert([{ owner_user_id, name, tin, rc, industry, vat_registered }])
       .select()
       .single();
 
-if (companyError) {
-  console.error("CREATE COMPANY ERROR FULL:", companyError);
-  return res.status(500).json({
-    error: companyError.message,
-    details: companyError,
-  });
-}
+    if (companyError) {
+      console.error("CREATE COMPANY ERROR FULL:", companyError);
+      return res.status(500).json({
+        error: companyError.message,
+        details: companyError,
+      });
+    }
+
+    // 2️⃣ Assign Admin role
     const { error: roleError } = await supabase
       .from("company_users")
-      .insert([
-        { company_id: company.id, user_id: owner_user_id, role: "Admin" },
-      ]);
+      .insert([{ company_id: company.id, user_id: owner_user_id, role: "Admin" }]);
 
     if (roleError) {
       console.error("ASSIGN ROLE ERROR:", roleError);
       return res.status(500).json({ error: "Failed to assign role" });
     }
 
-    await seedDefaultAccounts(supabase, company.id);
+    // 3️⃣ ✅ Send response immediately
+    res.status(201).json(company);
 
-    res.json(company);
+    // 4️⃣ Non-blocking side effects: seed default accounts
+    try {
+      await seedDefaultAccounts(supabase, company.id);
+    } catch (seedErr) {
+      console.error("SEED DEFAULT ACCOUNTS FAILED:", seedErr);
+    }
+
   } catch (err) {
     console.error("CREATE COMPANY FATAL:", err);
     res.status(500).json({ error: "Failed to create company" });
@@ -137,7 +143,8 @@ router.get("/:companyId", async (req, res) => {
     const { companyId } = req.params;
 
     const { data, error } = await supabase
-      .from("companies")
+      .
+from("companies")
       .select("*")
       .eq("id", companyId)
       .single();
@@ -149,9 +156,7 @@ router.get("/:companyId", async (req, res) => {
 
     res.json(data);
   } catch (err) {
-    console.
-
-error("FETCH COMPANY FATAL:", err);
+    console.error("FETCH COMPANY FATAL:", err);
     res.status(500).json({ error: "Company fetch failed" });
   }
 });
